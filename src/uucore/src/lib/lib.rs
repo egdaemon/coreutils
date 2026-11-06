@@ -406,8 +406,37 @@ static UTIL_NAME: LazyLock<String> = LazyLock::new(|| {
         .into_owned()
 });
 
+/// Per invocation override for the utility name and execution phrase, see [`set_invocation`].
+static INVOCATION: std::sync::Mutex<Option<(&'static str, &'static str)>> =
+    std::sync::Mutex::new(None);
+
+/// Interned strings handed out by [`set_invocation`]; bounded by the number of distinct names.
+static INTERNED: std::sync::Mutex<std::collections::BTreeMap<String, &'static str>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn intern(s: &str) -> &'static str {
+    let mut interned = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = interned.get(s) {
+        return v;
+    }
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    interned.insert(s.to_owned(), leaked);
+    leaked
+}
+
+/// Set the utility name and execution phrase for the current invocation, instead of deriving
+/// them once from the process arguments. For hosts that run many utilities, one after the other,
+/// inside a single long lived process (e.g. a wasm reactor module). The calls must not overlap.
+pub fn set_invocation(util_name: &str, execution_phrase: &str) {
+    let mut inv = INVOCATION.lock().unwrap_or_else(|e| e.into_inner());
+    *inv = Some((intern(util_name), intern(execution_phrase)));
+}
+
 /// Derive the utility name.
 pub fn util_name() -> &'static str {
+    if let Some((name, _)) = *INVOCATION.lock().unwrap_or_else(|e| e.into_inner()) {
+        return name;
+    }
     &UTIL_NAME
 }
 
@@ -425,6 +454,9 @@ static EXECUTION_PHRASE: LazyLock<String> = LazyLock::new(|| {
 
 /// Derive the complete execution phrase for "usage".
 pub fn execution_phrase() -> &'static str {
+    if let Some((_, phrase)) = *INVOCATION.lock().unwrap_or_else(|e| e.into_inner()) {
+        return phrase;
+    }
     &EXECUTION_PHRASE
 }
 

@@ -12,6 +12,10 @@
 //! The host passes argv through guest memory it obtains from [`uu_alloc`] and releases with
 //! [`uu_free`]. Utilities that call `process::exit` terminate the instance, as they do in the
 //! command form.
+//!
+//! The module may be kept alive across many calls, but a call must finish before the next one
+//! starts (the module is single threaded). Per call state (argv[0], the exit code) is reset on
+//! entry. Other process wide state kept by utilities is not reset.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -64,6 +68,15 @@ fn run(
     if argv.is_empty() {
         argv.push(OsString::from(util));
     }
+
+    // The module is long lived and shared by every call, so nothing may carry over between them:
+    // argv[0] is per call and the exit code of a previous call must not leak into this one.
+    let argv0 = argv[0].to_string_lossy().into_owned();
+    let name = std::path::Path::new(&argv0)
+        .file_name()
+        .map_or_else(|| argv0.clone(), |n| n.to_string_lossy().into_owned());
+    uucore::set_invocation(&name, &argv0);
+    uucore::error::set_exit_code(0);
 
     let canonical = match util {
         "dir" | "vdir" => "ls",
