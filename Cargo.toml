@@ -231,6 +231,7 @@ clap_mangen = { workspace = true, optional = true }
 fluent-syntax = { workspace = true, optional = true }
 itertools.workspace = true
 jiff = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 phf.workspace = true
 regex = { workspace = true, optional = true }
 textwrap.workspace = true
@@ -600,7 +601,7 @@ feat_wasm = ["feat_common_core", "nproc"]
 # (see src/reactor.rs). Build as a wasm reactor module with:
 #   cargo rustc --lib --crate-type cdylib --release --target wasm32-wasip1 \
 #     --no-default-features --features "feat_wasm feat_wasm_reactor"
-feat_wasm_reactor = []
+feat_wasm_reactor = ["dep:libc"]
 # "feat_os_unix" == set of utilities which can be built/run on modern/usual *nix platforms.
 feat_os_unix = [
   "feat_Tier1",
