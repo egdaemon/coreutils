@@ -596,6 +596,11 @@ feat_Tier1 = [
 # "feat_wasm" == set of utilities which can be built for wasm target
 # We don't need to support all of wasm targets. So the ambiguous name is used at here
 feat_wasm = ["feat_common_core", "nproc"]
+# "feat_wasm_reactor" == export one `uu_<util>` function per enabled utility from the library
+# (see src/reactor.rs). Build as a wasm reactor module with:
+#   cargo rustc --lib --crate-type cdylib --release --target wasm32-wasip1 \
+#     --no-default-features --features "feat_wasm feat_wasm_reactor"
+feat_wasm_reactor = []
 # "feat_os_unix" == set of utilities which can be built/run on modern/usual *nix platforms.
 feat_os_unix = [
   "feat_Tier1",

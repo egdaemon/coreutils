@@ -6,3 +6,6 @@
 pub mod common;
 
 pub use common::validation;
+
+#[cfg(feature = "feat_wasm_reactor")]
+pub mod reactor;

@@ -105,6 +105,28 @@ pub fn main() {
     }
     entries.sort_by_key(|(name, _)| *name);
 
+    // Reactor bindings: one exported `uu_<name>` function per utility, for hosts that
+    // call into the module instead of running `_start`. See src/reactor.rs.
+    let mut rf = File::create(Path::new(&out_dir).join("uutils_reactor.rs")).unwrap();
+    if env::var_os("CARGO_FEATURE_FEAT_WASM_REACTOR").is_some() {
+        for (name, value) in &entries {
+            // export names are restricted to identifier characters (skips e.g. '[')
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let uumain = value.trim_start_matches('(').split(',').next().unwrap();
+            writeln!(
+                rf,
+                "#[unsafe(export_name = \"uu_{name}\")]\n\
+                 pub extern \"C\" fn uu_{name}(args: *const u8, len: usize) -> i32 {{\n\
+                 \x20   run(\"{name}\", {uumain}, args, len)\n\
+                 }}\n"
+            )
+            .unwrap();
+        }
+    }
+    rf.flush().unwrap();
+
     for (name, value) in entries {
         phf_map.entry(name, value);
     }
