@@ -40,6 +40,28 @@ pub unsafe extern "C" fn uu_free(ptr: *mut u8, len: usize) {
     drop(unsafe { Vec::from_raw_parts(ptr, 0, len.max(1)) });
 }
 
+/// Change the working directory that the following calls resolve relative paths against, since
+/// the module is shared by calls made from different directories. Returns 0, or the errno of the
+/// failure.
+///
+/// # Safety
+/// `path` must point at `len` readable bytes.
+#[unsafe(export_name = "uu_chdir")]
+pub unsafe extern "C" fn uu_chdir(path: *const u8, len: usize) -> i32 {
+    // SAFETY: guaranteed by the caller.
+    let raw = unsafe { std::slice::from_raw_parts(path, len) };
+    let Ok(dir) = std::ffi::CString::new(raw) else {
+        return libc::EINVAL;
+    };
+    // SAFETY: dir is a NUL terminated string that outlives the call.
+    if unsafe { libc::chdir(dir.as_ptr()) } == 0 {
+        return 0;
+    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
+}
+
 fn run(
     util: &str,
     uumain: fn(std::vec::IntoIter<OsString>) -> i32,
