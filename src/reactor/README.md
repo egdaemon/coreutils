@@ -17,7 +17,7 @@ which write their output as each chunk of stdin arrives.
 | cat       | yes          |        |
 | cksum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | comm      | yes          |        |
-| cp        | no           | interactive prompts read stdin |
+| cp        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | csplit    | yes          |        |
 | cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | date      | yes          |        |

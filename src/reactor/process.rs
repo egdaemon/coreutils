@@ -64,6 +64,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "basenc" => basenc,
             "cat" => cat,
             "comm" => comm,
+            "cp" => cp,
             "csplit" => csplit,
             "date" => date,
             "dircolors" => dircolors,
@@ -226,6 +227,8 @@ mod tests {
     use super::*;
 
     fn exec(args: &[&str], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
+        // the localizer is per thread, like each reactor call sets it up for its utility.
+        uucore::locale::setup_localization(args[0]).unwrap();
         let argv = args.iter().map(OsString::from).collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let code = match lookup(args[0]).expect("a process") {
@@ -522,6 +525,56 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    /// A directory of its own for a test, removed when it drops.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("reactor-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_string()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(feature = "cp")]
+    #[test]
+    fn cp_reports_each_copy_on_stdout() {
+        let dir = Scratch::new("cp-verbose");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["cp", "-v", &src, &dst], b"");
+        let expected = format!("'{src}' -> '{dst}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"x");
+    }
+
+    #[cfg(feature = "cp")]
+    #[test]
+    fn cp_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("cp-interactive");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        let (code, _, _) = exec(&["cp", "-i", &src, &dst], b"y\n");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
     }
 
     #[cfg(feature = "pwd")]

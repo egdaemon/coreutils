@@ -484,8 +484,7 @@ fn show_debug(copy_debug: &CopyDebug) -> io::Result<()> {
 
     let debug_string = translate!("cp-debug-copy-offload", "offload" => copy_debug.offload, "reflink" => copy_debug.reflink, "sparse" => copy_debug.sparse_detection);
 
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+    let mut stdout = uucore::io::stdout();
 
     stdout.write_all(debug_string.as_bytes())?;
     stdout.flush()?;
@@ -818,6 +817,20 @@ pub fn uu_app() -> Command {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    cp(args)
+}
+
+/// Runs cp like [`uumain`], isolated from the process's standard streams. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn io::Write,
+) -> UResult<()> {
+    uucore::io::isolate(stdin, stdout, || cp(args))?
+}
+
+fn cp(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let options = Options::from_matches(&matches)?;
@@ -1707,7 +1720,7 @@ impl OverwriteMode {
         match self {
             Self::NoClobber => {
                 if debug {
-                    println!("{}", translate!("cp-debug-skipped", "path" => path.quote()));
+                    uucore::outln!("{}", translate!("cp-debug-skipped", "path" => path.quote()));
                 }
                 Err(CpError::Skipped(false))
             }
@@ -2276,7 +2289,7 @@ fn handle_existing_dest(
 
     if options.update == UpdateMode::None {
         if options.debug {
-            println!("skipped {}", dest.quote());
+            uucore::outln!("skipped {}", dest.quote());
         }
         return Err(CpError::Skipped(false));
     }
@@ -2381,7 +2394,7 @@ fn delete_path(path: &Path, options: &Options) -> CopyResult<()> {
     match fs::remove_file(path) {
         Ok(()) => {
             if options.verbose {
-                println!(
+                uucore::outln!(
                     "{}",
                     translate!("cp-verbose-removed", "path" => path.quote())
                 );
@@ -2534,7 +2547,7 @@ fn print_paths(parents: bool, source: &Path, dest: &Path) -> CopyResult<()> {
 
     // Buffer the output so a failed write (e.g. stdout redirected to a full
     // disk) surfaces as one error instead of panicking inside println!.
-    let mut out = io::BufWriter::new(io::stdout().lock());
+    let mut out = io::BufWriter::new(uucore::io::stdout());
     let write_err = |e| CpError::IoErrContext(e, translate!("cp-error-write"));
     if parents {
         // For example, if copying file `a/b/c` and its parents
@@ -2643,7 +2656,7 @@ fn handle_copy_mode(
                     }
                     UpdateMode::None => {
                         if options.debug {
-                            println!("skipped {}", dest.quote());
+                            uucore::outln!("skipped {}", dest.quote());
                         }
 
                         return Ok(PerformedAction::Skipped);
