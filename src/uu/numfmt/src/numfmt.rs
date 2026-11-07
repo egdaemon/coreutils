@@ -19,12 +19,13 @@ use crate::options::{
 use crate::units::{Result, Unit};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValueSource};
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Read, Write, stderr};
+use std::io::{BufRead, BufWriter, IsTerminal, Read, Write, stderr};
 use std::str::FromStr;
 
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult};
 use uucore::i18n::decimal::locale_grouping_separator;
+use uucore::io::Streams;
 use uucore::parser::parse_size::{IEC_BASES, SI_BASES};
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
 use uucore::ranges::Range;
@@ -490,25 +491,18 @@ fn print_debug_warnings(options: &NumfmtOptions, matches: &ArgMatches) {
     }
 }
 
-/// The streams numfmt reads lines from and writes to: the process's own, or the ones its caller
-/// gives.
-enum Streams<'a> {
-    Process,
-    Given(&'a mut dyn Read, &'a mut dyn Write),
-}
-
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    numfmt(args, Streams::Process)
+    numfmt(args, Streams::process())
 }
 
 /// Runs numfmt like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    mut stdin: Box<dyn Read>,
+    stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    numfmt(args, Streams::Given(&mut *stdin, stdout))
+    numfmt(args, Streams::given(stdin, stdout))
 }
 
 fn numfmt(args: impl uucore::Args, streams: Streams) -> UResult<()> {
@@ -566,10 +560,10 @@ fn numfmt(args: impl uucore::Args, streams: Streams) -> UResult<()> {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(NumfmtError::IllegalArgument)?;
         match streams {
-            Streams::Process => {
+            Streams::Process(_) => {
                 handle_args(byte_args.into_iter(), &options, format_args.as_deref())
             }
-            Streams::Given(_, stdout) => with_writer(stdout, |stdout| {
+            Streams::Given { stdout, .. } => with_writer(stdout, |stdout| {
                 write_args(
                     byte_args.into_iter(),
                     &options,
@@ -580,13 +574,13 @@ fn numfmt(args: impl uucore::Args, streams: Streams) -> UResult<()> {
         }
     } else {
         match streams {
-            Streams::Process => {
+            Streams::Process(_) => {
                 let stdin = std::io::stdin();
                 handle_buffer(stdin.lock(), &options)
             }
-            Streams::Given(stdin, stdout) => with_writer(stdout, |stdout| {
-                handle_buffer_to(BufReader::new(stdin), &options, stdout)
-            }),
+            Streams::Given { stdin, stdout } => {
+                with_writer(stdout, |stdout| handle_buffer_to(stdin, &options, stdout))
+            }
         }
     };
 
