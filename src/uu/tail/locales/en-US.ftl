@@ -24,6 +24,7 @@ tail-help-polling-windows = Disable 'ReadDirectoryChanges' support and use polli
 
 # Error messages
 tail-error-cannot-follow-stdin-by-name = cannot follow { $stdin } by name
+tail-error-cannot-follow-isolated = cannot follow without the process's own file descriptors
 tail-error-cannot-open-no-such-file = cannot open '{ $file }' for reading: { $error }
 tail-error-reading-file = error reading '{ $file }': { $error }
 tail-error-cannot-follow-file-type = { $file }: cannot follow end of this type of file{ $msg }

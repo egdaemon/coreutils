@@ -71,7 +71,7 @@ which write their output as each chunk of stdin arrives.
 | split     | no           | `--filter` runs another program |
 | sum       | yes          |        |
 | tac       | yes          |        |
-| tail      | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |
 | tee       | yes, streams |        |
 | test      | no           | shell builtin; `-t` needs `isatty` |
 | touch     | no           | not ported yet |

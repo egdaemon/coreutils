@@ -96,6 +96,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "sleep" => sleep,
             "sum" => sum,
             "tac" => tac,
+            "tail" => tail,
             "tr" => tr,
             "truncate" => truncate,
             "tsort" => tsort,
@@ -473,6 +474,54 @@ mod tests {
             exec(&["cat", "-A"], b"a\tb\n"),
             (0, b"a^Ib$\n".to_vec(), Vec::new())
         );
+    }
+
+    #[cfg(feature = "tail")]
+    #[test]
+    fn tail_takes_the_last_lines_of_stdin() {
+        assert_eq!(
+            exec(&["tail", "-n", "2"], b"a\nb\nc\n"),
+            (0, b"b\nc\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "tail")]
+    #[test]
+    fn tail_starts_at_a_line_of_stdin() {
+        assert_eq!(
+            exec(&["tail", "-n", "+2"], b"a\nb\nc\n"),
+            (0, b"b\nc\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "tail")]
+    #[test]
+    fn tail_names_each_file_it_reads() {
+        let dir = env::temp_dir().join(format!("reactor-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"1\n2\n").unwrap();
+
+        let (code, stdout, stderr) =
+            exec(&["tail", "-c", "2", file.to_str().unwrap(), "-"], b"xyz");
+        let expected = format!(
+            "==> {} <==\n2\n\n==> 'standard input' <==\nyz",
+            file.display()
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "tail")]
+    #[test]
+    fn tail_refuses_to_follow() {
+        let (code, stdout, stderr) = exec(&["tail", "-f", "/dev/null"], b"");
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
     }
 
     #[cfg(feature = "pwd")]
