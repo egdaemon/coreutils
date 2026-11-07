@@ -41,7 +41,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::Utf8Error;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use uucore::diagnostics::OptionValue;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, strip_errno};
@@ -236,12 +236,14 @@ fn count_non_null_bytes(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&c| c != b'\0').count()
 }
 
-pub struct Output {
+pub struct Output<'a> {
     file: Option<(OsString, File)>,
+    // a caller's stdout, written in place of the process's.
+    stdout: Option<&'a mut dyn Write>,
 }
 
-impl Output {
-    fn new(name: Option<impl AsRef<OsStr>>) -> UResult<Self> {
+impl<'a> Output<'a> {
+    fn new(name: Option<impl AsRef<OsStr>>, stdout: Option<&'a mut dyn Write>) -> UResult<Self> {
         let file = if let Some(name) = name {
             let path = Path::new(name.as_ref());
             // This is different from `File::create()` because we don't truncate the output yet.
@@ -259,10 +261,10 @@ impl Output {
         } else {
             None
         };
-        Ok(Self { file })
+        Ok(Self { file, stdout })
     }
 
-    fn into_write(self) -> UResult<BufWriter<Box<dyn Write>>> {
+    fn into_write(self) -> UResult<BufWriter<Box<dyn Write + 'a>>> {
         Ok(BufWriter::new(match self.file {
             Some((name, file)) => {
                 // Only regular files can be truncated; there a failure leaves stale bytes.
@@ -274,7 +276,10 @@ impl Output {
                 }
                 Box::new(file)
             }
-            None => Box::new(stdout()),
+            None => match self.stdout {
+                Some(stdout) => Box::new(stdout),
+                None => Box::new(stdout()),
+            },
         }))
     }
 
@@ -295,9 +300,30 @@ impl Output {
     }
 }
 
+/// The stdin `-` reads: the process's own, or the input a caller gives. A caller's input is read
+/// ahead, since sort's inputs move to its reader threads, and only the first `-` reads it.
+#[derive(Clone, Default)]
+enum Stdin {
+    #[default]
+    Process,
+    Given(Arc<Mutex<Option<Vec<u8>>>>),
+}
+
+impl Stdin {
+    fn open(&self) -> Box<dyn Read + Send> {
+        match self {
+            Self::Process => Box::new(stdin()),
+            Self::Given(input) => Box::new(std::io::Cursor::new(
+                input.lock().unwrap().take().unwrap_or_default(),
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GlobalSettings {
     mode: SortMode,
+    stdin: Stdin,
     debug: bool,
     ignore_leading_blanks: bool,
     ignore_case: bool,
@@ -492,6 +518,7 @@ impl Default for GlobalSettings {
             merge_batch_size: default_merge_batch_size(),
             numeric_locale: NumInfoParseSettings::default(),
             precomputed: Precomputed::default(),
+            stdin: Stdin::Process,
         }
     }
 }
@@ -2090,10 +2117,35 @@ where
 }
 
 #[uucore::main]
-#[allow(clippy::cognitive_complexity)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    sort(args, Stdin::Process, None)
+}
+
+/// Runs sort like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let mut input = Vec::new();
+    stdin
+        .read_to_end(&mut input)
+        .map_err(|error| SortError::ReadFailed {
+            path: PathBuf::from(STDIN_FILE),
+            error,
+        })?;
+    sort(
+        args,
+        Stdin::Given(Arc::new(Mutex::new(Some(input)))),
+        Some(stdout),
+    )
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn sort(args: impl uucore::Args, stdin: Stdin, stdout: Option<&mut dyn Write>) -> UResult<()> {
     let mut settings = GlobalSettings {
         numeric_locale: NumInfoParseSettings::from_locale(),
+        stdin,
         ..Default::default()
     };
 
@@ -2164,7 +2216,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         let mut files = Vec::new();
 
         // sort errors with "cannot open: [...]" instead of "cannot read: [...]" here
-        let reader = open_with_open_failed_error(&files0_from)?;
+        let reader = open_with_open_failed_error(&files0_from, &settings.stdin)?;
         let buf_reader = BufReader::new(reader);
         for (line_num, line_res) in buf_reader.split(b'\0').enumerate() {
             let line = line_res.map_err(|error| SortError::ReadFailed {
@@ -2272,6 +2324,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     settings.compress_prog = matches
         .get_one::<String>(options::COMPRESS_PROG)
         .map(String::from);
+
+    // run with a caller's streams, there are no other programs to compress with.
+    if stdout.is_some() && settings.compress_prog.is_some() {
+        return Err(USimpleError::new(
+            2,
+            translate!("sort-error-compress-prog-isolated"),
+        ));
+    }
 
     if let Some(n_merge) = matches.get_one::<String>(options::BATCH_SIZE) {
         // `None` means the value does not even fit in a `usize`, which is always too large.
@@ -2423,7 +2483,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             .any(|selector| selector.settings.mode == SortMode::Random);
     if needs_random {
         settings.salt = Some(match settings.random_source.as_deref() {
-            Some(path) => salt_from_random_source(path)?,
+            Some(path) => salt_from_random_source(path, &settings.stdin)?,
             None => get_rand_string(),
         });
     }
@@ -2432,7 +2492,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         check_inputs(&files)?;
     }
 
-    let output = Output::new(matches.get_one::<OsString>(options::OUTPUT))?;
+    let output = Output::new(matches.get_one::<OsString>(options::OUTPUT), stdout)?;
 
     if settings.debug {
         let global_flags = GlobalOptionFlags::from_matches(&matches);
@@ -2448,6 +2508,15 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let needs_locale_collation = false;
 
     settings.init_precomputed(needs_locale_collation);
+
+    // checking and merging read their inputs on threads, which wasi does not have.
+    #[cfg(target_os = "wasi")]
+    if output.stdout.is_some() && (settings.check || settings.merge) {
+        return Err(USimpleError::new(
+            2,
+            translate!("sort-error-check-merge-isolated"),
+        ));
+    }
 
     let result = exec(&mut files, &settings, output, &mut tmp_dir);
     // Wait here if `SIGINT` was received,
@@ -2708,7 +2777,7 @@ pub fn uu_app() -> Command {
 fn exec(
     files: &mut [OsString],
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
     tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     // GNU: --check takes precedence over --merge when both are given.
@@ -2728,7 +2797,7 @@ fn exec(
     } else {
         // Open each input once, when it is reached, so that only one input is open
         // at a time and FIFOs are never reopened.
-        let mut lines = files.iter().map(open);
+        let mut lines = files.iter().map(|file| open(file, &settings.stdin));
         ext_sort(&mut lines, settings, output, tmp_dir)
     }
 }
@@ -3137,8 +3206,8 @@ const RANDOM_SOURCE_TAG: &[u8] = b"uutils-sort-random-source"; // Domain separat
 /// The file has to hold at least [`SALT_LEN`] bytes. GNU asks for the same 128
 /// bits and reports `end of file` when the source cannot supply them, rather
 /// than shuffling with whatever it managed to read.
-fn salt_from_random_source(path: &Path) -> UResult<[u8; SALT_LEN]> {
-    let mut reader = open_with_open_failed_error(path)?;
+fn salt_from_random_source(path: &Path, stdin: &Stdin) -> UResult<[u8; SALT_LEN]> {
+    let mut reader = open_with_open_failed_error(path, stdin)?;
     let mut buf = [0u8; BUF_LEN];
     let mut total = 0usize;
     // freeze seed for --random-source
@@ -3305,7 +3374,7 @@ fn month_compare(a: &[u8], b: &[u8]) -> Ordering {
 fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
     iter: T,
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
 ) -> UResult<()> {
     let ctx = output.write_failed_context();
     let mut writer = output.into_write()?;
@@ -3348,11 +3417,10 @@ fn check_readable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn open(path: impl AsRef<OsStr>) -> UResult<Box<dyn Read + Send>> {
+fn open(path: impl AsRef<OsStr>, stdin: &Stdin) -> UResult<Box<dyn Read + Send>> {
     let path = path.as_ref();
     if path == STDIN_FILE {
-        let stdin = stdin();
-        return Ok(Box::new(stdin) as Box<dyn Read + Send>);
+        return Ok(stdin.open());
     }
 
     let path = Path::new(path);
@@ -3366,12 +3434,14 @@ fn open(path: impl AsRef<OsStr>) -> UResult<Box<dyn Read + Send>> {
     }
 }
 
-fn open_with_open_failed_error(path: impl AsRef<OsStr>) -> UResult<Box<dyn Read + Send>> {
+fn open_with_open_failed_error(
+    path: impl AsRef<OsStr>,
+    stdin: &Stdin,
+) -> UResult<Box<dyn Read + Send>> {
     // On error, returns an OpenFailed error instead of a ReadFailed error
     let path = path.as_ref();
     if path == STDIN_FILE {
-        let stdin = stdin();
-        return Ok(Box::new(stdin) as Box<dyn Read + Send>);
+        return Ok(stdin.open());
     }
 
     let path = Path::new(path);

@@ -19,7 +19,7 @@ which write their output as each chunk of stdin arrives.
 | comm      | yes          |        |
 | cp        | no           | interactive prompts read stdin |
 | csplit    | yes          |        |
-| cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| cut       | yes          |        |
 | date      | yes          |        |
 | dd        | no           | operates on file descriptors directly |
 | dir       | no           | layout and colour depend on the terminal |
@@ -45,8 +45,8 @@ which write their output as each chunk of stdin arrives.
 | nice      | yes          | runs only a command the reactor runs through `uumain_with`, at niceness 0 |
 | nl        | yes          |        |
 | nproc     | yes          |        |
-| numfmt    | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
-| od        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| numfmt    | yes          |        |
+| od        | yes          |        |
 | paste     | yes          |        |
 | pathchk   | yes          |        |
 | pr        | yes          |        |
@@ -67,8 +67,8 @@ which write their output as each chunk of stdin arrives.
 | shred     | no           | operates on file descriptors directly |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
-| sort      | no           | `--compress-program` runs another program |
-| split     | no           | `--filter` runs another program |
+| sort      | yes          | `--compress-program` fails: there are no other programs; `-c` and `-m` fail on wasi: they read on threads |
+| split     | yes          | `--filter` fails: there are no other programs |
 | sum       | yes          |        |
 | tac       | yes          |        |
 | tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |

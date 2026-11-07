@@ -34,7 +34,7 @@ pub fn check(path: &OsStr, settings: &GlobalSettings) -> UResult<()> {
         // Otherwise, the line previous line must compare _less or equal_ to the next one.
         Ordering::Equal
     };
-    let file = open(path)?;
+    let file = open(path, &settings.stdin)?;
     let (recycled_sender, recycled_receiver) = sync_channel(2);
     let (loaded_sender, loaded_receiver) = sync_channel(2);
     let reader_join_handle = thread::spawn({

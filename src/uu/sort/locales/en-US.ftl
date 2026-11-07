@@ -25,6 +25,8 @@ sort-file-operands-combined = extra operand {$file}
     Try '{$help} --help' for more information.
 sort-multiple-output-files = multiple output files specified
 sort-multiple-compress-programs = multiple compress programs specified
+sort-error-compress-prog-isolated = cannot run a compress program in isolation
+sort-error-check-merge-isolated = cannot check or merge in isolation without threads
 sort-incompatible-tabs = incompatible tabs
 sort-minus-in-stdin = when reading file names from standard input, no file name of '-' allowed
 sort-no-input-from = no input from {$file}

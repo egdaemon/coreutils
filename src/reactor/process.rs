@@ -72,6 +72,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "cat" => cat,
             "comm" => comm,
             "csplit" => csplit,
+            "cut" => cut,
             "date" => date,
             "dircolors" => dircolors,
             "dirname" => dirname,
@@ -91,6 +92,8 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "mktemp" => mktemp,
             "nl" => nl,
             "nproc" => nproc,
+            "numfmt" => numfmt,
+            "od" => od,
             "paste" => paste,
             "pathchk" => pathchk,
             "pr" => pr,
@@ -104,6 +107,8 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "seq" => seq,
             "shuf" => shuf,
             "sleep" => sleep,
+            "sort" => sort,
+            "split" => split,
             "sum" => sum,
             "tac" => tac,
             "tail" => tail,
@@ -714,6 +719,157 @@ mod tests {
         let (code, stdout, stderr) = exec(&["nice", "missing"], b"");
         assert_eq!((code, stdout), (127, Vec::new()));
         assert!(String::from_utf8(stderr).unwrap().contains("'missing'"));
+    #[cfg(feature = "cut")]
+    #[test]
+    fn cut_selects_fields_of_stdin() {
+        assert_eq!(
+            exec(&["cut", "-d", ",", "-f", "2"], b"a,b,c\nd,e,f\n"),
+            (0, b"b\ne\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "cut")]
+    #[test]
+    fn cut_selects_bytes_of_a_file_and_stdin() {
+        let dir = env::temp_dir().join(format!("reactor-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abc\n").unwrap();
+
+        let (code, stdout, stderr) =
+            exec(&["cut", "-b", "1-2", file.to_str().unwrap(), "-"], b"xyz\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"ab\nxy\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "numfmt")]
+    #[test]
+    fn numfmt_converts_the_lines_of_stdin() {
+        assert_eq!(
+            exec(&["numfmt", "--to=iec"], b"1024\n2048\n"),
+            (0, b"1.0K\n2.0K\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "numfmt")]
+    #[test]
+    fn numfmt_converts_its_arguments() {
+        assert_eq!(
+            exec(&["numfmt", "--from=si", "1K", "2M"], b""),
+            (0, b"1000\n2000000\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "od")]
+    #[test]
+    fn od_dumps_stdin() {
+        assert_eq!(
+            exec(&["od", "-An", "-tx1"], b"AB"),
+            (0, b" 41 42\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "od")]
+    #[test]
+    fn od_skips_into_stdin_after_a_file() {
+        let dir = env::temp_dir().join(format!("reactor-od-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"ab").unwrap();
+
+        let (code, stdout, stderr) = exec(
+            &["od", "-An", "-c", "-j", "3", file.to_str().unwrap(), "-"],
+            b"xyz",
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"   y   z\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_sorts_stdin() {
+        assert_eq!(
+            exec(&["sort", "-n"], b"10\n9\n100\n"),
+            (0, b"9\n10\n100\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_reads_stdin_once_among_files() {
+        let dir = env::temp_dir().join(format!("reactor-sort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"b\nd\n").unwrap();
+
+        let (code, stdout, stderr) = exec(
+            &["sort", "-u", file.to_str().unwrap(), "-", "-"],
+            b"c\na\nb\n",
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"a\nb\nc\nd\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_refuses_a_compress_program() {
+        let (code, stdout, stderr) = exec(&["sort", "--compress-program=gzip"], b"b\na\n");
+        assert_eq!(code, 2);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_writes_a_chunk_of_stdin_to_stdout() {
+        assert_eq!(
+            exec(&["split", "-n", "2/2"], b"abcd"),
+            (0, b"cd".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_writes_files_and_reports_them() {
+        let dir = env::temp_dir().join(format!("reactor-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("x");
+
+        let (code, stdout, stderr) = exec(
+            &[
+                "split",
+                "-l",
+                "1",
+                "--verbose",
+                "-",
+                prefix.to_str().unwrap(),
+            ],
+            b"a\nb\n",
+        );
+        // the message is localized, so only the report of each file is checked.
+        assert_eq!((code, stderr), (0, Vec::new()));
+        assert_eq!(String::from_utf8(stdout).unwrap().lines().count(), 2);
+        assert_eq!(std::fs::read(dir.join("xaa")).unwrap(), b"a\n");
+        assert_eq!(std::fs::read(dir.join("xab")).unwrap(), b"b\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_refuses_a_filter() {
+        let (code, stdout, stderr) = exec(&["split", "--filter=cat"], b"a\n");
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
     }
 
     #[cfg(feature = "pwd")]

@@ -22,14 +22,16 @@ mod prn_char;
 mod prn_float;
 mod prn_int;
 
+use std::cell::RefCell;
 use std::cmp;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read};
+use std::rc::Rc;
 
 use crate::byteorder_io::ByteOrder;
 use crate::formatter_item_info::FormatWriter;
 use crate::input_decoder::{InputDecoder, MemoryDecoder};
 use crate::input_offset::{InputOffset, Radix};
-use crate::multifile_reader::{HasError, InputSource, MultifileReader};
+use crate::multifile_reader::{HasError, InputSource, MultifileReader, SharedStdin};
 use crate::output_info::OutputInfo;
 use crate::parse_formats::{ParsedFormatterItemInfo, parse_format_flags};
 use crate::parse_inputs::{CommandLineInputs, parse_inputs};
@@ -265,6 +267,28 @@ impl OdOptions {
 /// opens the input and calls `odfunc` to process the input.
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    od(args, None, &mut std::io::stdout().lock())
+}
+
+/// Runs od like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    let stdin: SharedStdin = Rc::new(RefCell::new(stdin));
+    let mut out = BufWriter::new(stdout);
+    let result = od(args, Some(&stdin), &mut out);
+    std::io::Write::flush(&mut out)?;
+    result
+}
+
+/// Runs od, reading `-` from `stdin` when given and from the process's stdin otherwise.
+fn od(
+    args: impl uucore::Args,
+    stdin: Option<&SharedStdin>,
+    out: &mut impl std::io::Write,
+) -> UResult<()> {
     let raw_args: Vec<OsString> = args.collect();
     // Keep a text view for option scanning, but parse filenames from the raw arguments.
     let args: Vec<String> = raw_args
@@ -279,7 +303,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // Kept for the caret in SIZE diagnostics, which echoes the command line.
     let diag_args = uucore::diagnostics::capture(&raw_args);
     let od_options = OdOptions::new(&clap_matches, &args, diag_args.as_deref())?;
-    let mut out = std::io::stdout().lock();
 
     // Check if we're in strings mode
     if let Some(min_length) = od_options.string_min_length {
@@ -289,7 +312,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             od_options.read_bytes,
             min_length,
             od_options.radix,
-            &mut out,
+            stdin,
+            out,
         )
     } else {
         let mut input_offset =
@@ -299,6 +323,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             &od_options.input_strings,
             od_options.skip_bytes,
             od_options.read_bytes,
+            stdin,
         )?;
         let mut input_decoder = InputDecoder::new(
             &mut input,
@@ -313,12 +338,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             od_options.output_duplicates,
         );
 
-        odfunc(
-            &mut input_offset,
-            &mut input_decoder,
-            &output_info,
-            &mut out,
-        )
+        odfunc(&mut input_offset, &mut input_decoder, &output_info, out)
     }
 }
 
@@ -622,9 +642,10 @@ fn extract_strings_from_input(
     read_bytes: Option<u64>,
     min_length: usize,
     radix: Radix,
+    stdin: Option<&SharedStdin>,
     writer: &mut impl std::io::Write,
 ) -> UResult<()> {
-    let inputs = map_input_strings(input_strings);
+    let inputs = map_input_strings(input_strings, stdin);
     let mut mf = MultifileReader::new(inputs);
 
     // Skipping past the end of the input is an error, as without -S.
@@ -807,12 +828,17 @@ fn write_bytes(
 }
 
 /// Helper function to convert input strings to [`InputSource`]
-fn map_input_strings(input_strings: &[OsString]) -> Vec<InputSource<'_>> {
+fn map_input_strings<'a>(
+    input_strings: &'a [OsString],
+    stdin: Option<&SharedStdin>,
+) -> Vec<InputSource<'a>> {
     input_strings
         .iter()
         .map(|w| {
             if w == "-" {
-                InputSource::Stdin
+                stdin.map_or(InputSource::Stdin, |stdin| {
+                    InputSource::Given(stdin.clone())
+                })
             } else {
                 InputSource::FileName(w)
             }
@@ -824,13 +850,14 @@ fn map_input_strings(input_strings: &[OsString]) -> Vec<InputSource<'_>> {
 ///
 /// `skip_bytes` is the number of bytes skipped from the input
 /// `read_bytes` is an optional limit to the number of bytes to read
-fn open_input_peek_reader(
-    input_strings: &[OsString],
+fn open_input_peek_reader<'a>(
+    input_strings: &'a [OsString],
     skip_bytes: u64,
     read_bytes: Option<u64>,
-) -> UResult<PeekReader<BufReader<PartialReader<MultifileReader<'_>>>>> {
+    stdin: Option<&SharedStdin>,
+) -> UResult<PeekReader<BufReader<PartialReader<MultifileReader<'a>>>>> {
     // should return  "impl PeekRead + Read + HasError" when supported in (stable) rust
-    let inputs = map_input_strings(input_strings);
+    let inputs = map_input_strings(input_strings, stdin);
     let mut mf = MultifileReader::new(inputs);
     mf.skip(skip_bytes)
         .map_err(|e| USimpleError::new(1, e.to_string()))?;
