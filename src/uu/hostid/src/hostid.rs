@@ -7,7 +7,7 @@
 
 use clap::Command;
 use core::ffi::c_long;
-use std::io::{Write, stdout};
+use std::io::Write;
 use uucore::{error::UResult, format_usage, translate};
 
 // support targets missing libc::gethostid
@@ -54,6 +54,19 @@ fn gethostid() -> c_long {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    hostid(args, &mut std::io::stdout().lock())
+}
+
+/// Runs hostid like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    hostid(args, stdout)
+}
+
+fn hostid(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     // The identifier `gethostid` reports is 32 bits wide, but it arrives in a
     // `c_long`, and nothing promises how the unused upper bits are filled. Mask
@@ -67,7 +80,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let mask = 0xffff_ffff;
 
     result &= mask;
-    writeln!(stdout(), "{result:0>8x}")?;
+    writeln!(stdout, "{result:0>8x}")?;
     Ok(())
 }
 

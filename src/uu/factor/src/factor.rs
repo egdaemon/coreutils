@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::BufRead;
-use std::io::{self, Write, stdin, stdout};
+use std::io::{self, Write};
 use std::iter::once;
 use std::num::IntErrorKind;
 
@@ -151,22 +151,37 @@ fn write_result(
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    factor_with(args, &mut io::stdin().lock(), &mut io::stdout().lock())
+}
+
+/// Runs factor like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    factor_with(args, stdin, stdout)
+}
+
+fn factor_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     // If matches find --exponents flag than variable print_exponents is true and p^e output format will be used.
     let print_exponents = matches.get_flag(options::EXPONENTS);
 
-    let stdout = stdout();
     // use a smaller buffer here to pass a GNU test.
-    let mut w = io::BufWriter::with_capacity(4 * 1024, stdout.lock());
+    let mut w = io::BufWriter::with_capacity(4 * 1024, stdout);
 
     if let Some(values) = matches.get_many::<String>(options::NUMBER) {
         for number in values {
             write_factors_str(number.as_bytes(), &mut w, print_exponents)?;
         }
     } else {
-        let stdin = stdin();
-        let lines = stdin.lock().split(LF);
+        let lines = io::BufReader::new(stdin).split(LF);
         for line in lines {
             match line {
                 Ok(line) => {

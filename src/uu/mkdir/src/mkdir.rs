@@ -86,6 +86,19 @@ fn get_mode(matches: &ArgMatches, diag_args: Option<&[OsString]>) -> UResult<Opt
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    mkdir_with(args, &mut stdout().lock())
+}
+
+/// Runs mkdir like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    mkdir_with(args, stdout)
+}
+
+fn mkdir_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     // Linux-specific options, not implemented
     // opts.optflag("Z", "context", "set SELinux security context" +
     // " of each created directory to CTX"),
@@ -113,7 +126,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         context,
     };
 
-    exec(dirs, &config);
+    exec(dirs, &config, stdout);
 
     Ok(())
 }
@@ -174,12 +187,12 @@ pub fn uu_app() -> Command {
 /**
  * Create the list of new directories
  */
-fn exec(dirs: ValuesRef<OsString>, config: &Config) {
+fn exec(dirs: ValuesRef<OsString>, config: &Config, stdout: &mut dyn Write) {
     for dir in dirs {
         let path_buf = PathBuf::from(dir);
         let path = path_buf.as_path();
 
-        show_if_err!(mkdir(path, config));
+        show_if_err!(mkdir_to(path, config, stdout));
     }
 }
 
@@ -197,6 +210,10 @@ fn exec(dirs: ValuesRef<OsString>, config: &Config) {
 /// To match the GNU behavior, a path with the last directory being a single dot
 /// (like `some/path/to/.`) is created (with the dot stripped).
 pub fn mkdir(path: &Path, config: &Config) -> UResult<()> {
+    mkdir_to(path, config, &mut stdout().lock())
+}
+
+fn mkdir_to(path: &Path, config: &Config, stdout: &mut dyn Write) -> UResult<()> {
     if path.as_os_str().is_empty() {
         return Err(USimpleError::new(
             1,
@@ -208,12 +225,17 @@ pub fn mkdir(path: &Path, config: &Config) -> UResult<()> {
     // std::fs::create_dir("foo/."); fails in pure Rust
     let path_buf = dir_strip_dot_for_creation(path);
     let path = path_buf.as_path();
-    create_dir(path, false, config)
+    create_dir(path, false, config, stdout)
 }
 
 // Create a directory at the given path.
 // Uses iterative approach instead of recursion to avoid stack overflow with deep nesting.
-fn create_dir(path: &Path, is_parent: bool, config: &Config) -> UResult<()> {
+fn create_dir(
+    path: &Path,
+    is_parent: bool,
+    config: &Config,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     if path.as_os_str().is_empty() {
         return Ok(());
     }
@@ -237,11 +259,11 @@ fn create_dir(path: &Path, is_parent: bool, config: &Config) -> UResult<()> {
             .iter()
             .rev()
             .filter(|dir| !dir.exists())
-            .try_for_each(|dir| create_single_dir(dir, true, config))?;
+            .try_for_each(|dir| create_single_dir(dir, true, config, stdout))?;
     }
 
     // Create the target directory
-    create_single_dir(path, is_parent, config)
+    create_single_dir(path, is_parent, config, stdout)
 }
 
 /// Create a directory with the exact mode specified, bypassing umask.
@@ -267,7 +289,12 @@ fn create_dir_with_mode(path: &Path, _mode: u32, _shaped_umask: u32) -> std::io:
 // Helper function to create a single directory with appropriate permissions
 // `is_parent` argument is not used on windows
 #[cfg_attr(not(unix), allow(unused_variables))]
-fn create_single_dir(path: &Path, is_parent: bool, config: &Config) -> UResult<()> {
+fn create_single_dir(
+    path: &Path,
+    is_parent: bool,
+    config: &Config,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     #[cfg(unix)]
     let (mkdir_mode, shaped_umask) = {
         let umask = mode::get_umask();
@@ -307,7 +334,7 @@ fn create_single_dir(path: &Path, is_parent: bool, config: &Config) -> UResult<(
         Ok(()) => {
             if config.verbose {
                 writeln!(
-                    stdout(),
+                    stdout,
                     "{}",
                     translate!("mkdir-verbose-created-directory", "util_name" => "mkdir", "path" => path.quote())
                 )?;
@@ -335,7 +362,7 @@ fn create_single_dir(path: &Path, is_parent: bool, config: &Config) -> UResult<(
             // This matches GNU behavior for paths like "test_dir/../test_dir_a"
             if config.verbose && is_parent && config.recursive && !ends_with_parent_dir {
                 writeln!(
-                    stdout(),
+                    stdout,
                     "{}",
                     translate!("mkdir-verbose-created-directory", "util_name" => "mkdir", "path" => path.quote())
                 )?;

@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 
 use clap::{Arg, ArgAction, Command};
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
-use uucore::display::{print_verbatim, println_verbatim};
+use uucore::display::{write_verbatim, writeln_verbatim};
 use uucore::translate;
 use uucore::{
     error::{UResult, USimpleError},
@@ -155,6 +155,19 @@ pub struct Options {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    uname(args, &mut std::io::stdout().lock())
+}
+
+/// Runs uname like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    uname(args, stdout)
+}
+
+fn uname(args: impl uucore::Args, stdout: &mut dyn std::io::Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let options = Options {
@@ -171,10 +184,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
     let output = UNameOutput::new(&options)?;
     if options.all_labeled {
-        print_verbatim(output.display_labeled().as_os_str())
+        write_verbatim(stdout, output.display_labeled().as_os_str())
             .map_err(|e| USimpleError::new(1, e.to_string()))?;
     } else {
-        println_verbatim(output.display().as_os_str())
+        writeln_verbatim(stdout, output.display().as_os_str())
             .map_err(|e| USimpleError::new(1, e.to_string()))?;
     }
     Ok(())

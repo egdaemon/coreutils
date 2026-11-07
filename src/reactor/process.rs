@@ -38,18 +38,51 @@ pub enum Utility {
     Stream(Spawn),
 }
 
+/// The utilities that run through their `uumain_with`, each when its feature is enabled.
+macro_rules! mains {
+    ($util:expr, $($name:literal => $krate:ident),* $(,)?) => {
+        match $util {
+            $(
+                #[cfg(feature = $name)]
+                $name => Some(Utility::Main(::$krate::uumain_with)),
+            )*
+            _ => None,
+        }
+    };
+}
+
 /// The utilities available as processes.
 pub fn lookup(util: &str) -> Option<Utility> {
     match util {
-        #[cfg(feature = "echo")]
-        "echo" => Some(Utility::Main(::echo::uumain_with)),
         #[cfg(feature = "tee")]
         "tee" => Some(Utility::Stream(tee)),
-        #[cfg(feature = "pwd")]
-        "pwd" => Some(Utility::Main(::pwd::uumain_with)),
-        #[cfg(feature = "tr")]
-        "tr" => Some(Utility::Main(::tr::uumain_with)),
-        _ => None,
+        util => mains!(util,
+            "arch" => arch,
+            "basename" => basename,
+            "date" => date,
+            "dircolors" => dircolors,
+            "dirname" => dirname,
+            "echo" => echo,
+            "expr" => expr,
+            "factor" => factor,
+            "hostid" => hostid,
+            "link" => link,
+            "mkdir" => mkdir,
+            "mktemp" => mktemp,
+            "nproc" => nproc,
+            "printenv" => printenv,
+            "printf" => printf,
+            "pwd" => pwd,
+            "readlink" => readlink,
+            "realpath" => realpath,
+            "rmdir" => rmdir,
+            "seq" => seq,
+            "sleep" => sleep,
+            "tr" => tr,
+            "truncate" => truncate,
+            "uname" => uname,
+            "unlink" => unlink,
+        ),
     }
 }
 
@@ -259,6 +292,33 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "seq")]
+    #[test]
+    fn seq_counts() {
+        assert_eq!(
+            exec(&["seq", "1", "3"], b""),
+            (0, b"1\n2\n3\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "basename")]
+    #[test]
+    fn basename_strips_the_directory_and_suffix() {
+        assert_eq!(
+            exec(&["basename", "/a/b.txt", ".txt"], b""),
+            (0, b"b\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "factor")]
+    #[test]
+    fn factor_reads_numbers_from_stdin() {
+        assert_eq!(
+            exec(&["factor"], b"12\n"),
+            (0, b"12: 2 2 3\n".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "pwd")]

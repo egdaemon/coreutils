@@ -55,6 +55,20 @@ pub fn print_verbatim<S: AsRef<OsStr>>(text: S) -> io::Result<()> {
     io::stdout().write_all_os(text.as_ref())
 }
 
+/// Like `println_verbatim`, writing to `w` instead of stdout.
+pub fn writeln_verbatim<W: OsWrite + ?Sized, S: AsRef<OsStr>>(
+    w: &mut W,
+    text: S,
+) -> io::Result<()> {
+    w.write_all_os(text.as_ref())?;
+    w.write_all(b"\n")
+}
+
+/// Like `print_verbatim`, writing to `w` instead of stdout.
+pub fn write_verbatim<W: OsWrite + ?Sized, S: AsRef<OsStr>>(w: &mut W, text: S) -> io::Result<()> {
+    w.write_all_os(text.as_ref())
+}
+
 /// [`io::Write`], but for OS strings.
 ///
 /// On Unix this works straightforwardly.
@@ -108,6 +122,9 @@ impl OsWrite for StdoutLock<'_> {}
 // doing a raw write.
 impl<W: OsWrite> OsWrite for BufWriter<W> {}
 
+// The standard streams of a utility run in isolation, see `uumain_with`.
+impl OsWrite for dyn io::Write + '_ {}
+
 impl OsWrite for Box<dyn OsWrite> {
     fn write_all_os(&mut self, buf: &OsStr) -> io::Result<()> {
         let this: &mut dyn OsWrite = self;
@@ -120,7 +137,14 @@ impl OsWrite for Box<dyn OsWrite> {
 /// This function handles non-UTF-8 environment variable names and values correctly by using
 /// raw bytes on Unix systems.
 pub fn print_all_env_vars<T: fmt::Display>(line_ending: T) -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
+    write_all_env_vars(&mut io::stdout().lock(), line_ending)
+}
+
+/// Like `print_all_env_vars`, writing to `stdout` instead of the process's standard output.
+pub fn write_all_env_vars<W: OsWrite + ?Sized, T: fmt::Display>(
+    stdout: &mut W,
+    line_ending: T,
+) -> io::Result<()> {
     for (name, value) in env::vars_os() {
         stdout.write_all_os(&name)?;
         stdout.write_all(b"=")?;

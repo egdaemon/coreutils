@@ -11,12 +11,12 @@ use clap::{
 };
 use std::{
     ffi::{OsStr, OsString},
-    io::{Write, stdout},
+    io::Write,
     path::{Path, PathBuf},
 };
 use uucore::translate;
 use uucore::{
-    display::{Quotable, print_verbatim},
+    display::{Quotable, write_verbatim},
     error::{FromIo, UResult},
     format_usage,
     fs::{MissingHandling, ResolveMode, canonicalize},
@@ -72,6 +72,19 @@ impl ValueParserFactory for NonEmptyOsStringParser {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    realpath_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs realpath like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    realpath_with(args, stdout)
+}
+
+fn realpath_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     /*  the list of files */
@@ -113,6 +126,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             can_mode,
             relative_to.as_deref(),
             relative_base.as_deref(),
+            stdout,
         );
         if let Err(e) = result.map_err_context(|| path.maybe_quote().to_string()) {
             if quiet {
@@ -296,6 +310,7 @@ fn resolve_path(
     can_mode: MissingHandling,
     relative_to: Option<&Path>,
     relative_base: Option<&Path>,
+    stdout: &mut dyn Write,
 ) -> std::io::Result<()> {
     let abs = canonicalize(p, can_mode, resolve)?;
     if can_mode == MissingHandling::Normal {
@@ -307,8 +322,8 @@ fn resolve_path(
 
     let abs = process_relative(abs, relative_base, relative_to);
 
-    print_verbatim(abs)?;
-    stdout().write_all(&[line_ending.into()])?;
+    write_verbatim(stdout, abs)?;
+    stdout.write_all(&[line_ending.into()])?;
     Ok(())
 }
 

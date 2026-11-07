@@ -5,7 +5,7 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
-use std::io::{Write, stdout};
+use std::io::Write;
 use std::ops::ControlFlow;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, UUsageError};
@@ -27,7 +27,20 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    let result = print_formatted(args);
+    printf_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs printf like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    printf_with(args, stdout)
+}
+
+fn printf_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
+    let result = print_formatted(args, stdout);
 
     // A format without a trailing newline leaves the output sitting in the
     // buffer, so a failed write is only visible once it is flushed. Without
@@ -35,7 +48,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // A broken pipe is how a downstream reader normally ends a stream, so it
     // is left alone; and a failure already reported is not repeated.
     if result.is_ok()
-        && let Err(e) = stdout().flush()
+        && let Err(e) = stdout.flush()
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         return Err(e).map_err_context(|| translate!("common-write-error"));
@@ -66,7 +79,7 @@ fn mark_end_of_options(mut args: Vec<OsString>) -> Vec<OsString> {
     args
 }
 
-fn print_formatted(args: impl uucore::Args) -> UResult<()> {
+fn print_formatted(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in format diagnostics, which needs the format as typed.
     let diag_args = uucore::diagnostics::capture(&args);
@@ -100,7 +113,7 @@ fn print_formatted(args: impl uucore::Args) -> UResult<()> {
         if let Ok(FormatItem::Spec(_)) = item {
             format_seen = true;
         }
-        match item.map_err(raise)?.write(stdout(), &mut args)? {
+        match item.map_err(raise)?.write(&mut *stdout, &mut args)? {
             ControlFlow::Continue(()) => {}
             ControlFlow::Break(()) => return Ok(()),
         }
@@ -127,7 +140,7 @@ fn print_formatted(args: impl uucore::Args) -> UResult<()> {
 
     while !args.is_exhausted() {
         for item in parse_spec_and_escape(format) {
-            match item.map_err(raise)?.write(stdout(), &mut args)? {
+            match item.map_err(raise)?.write(&mut *stdout, &mut args)? {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(()) => return Ok(()),
             }

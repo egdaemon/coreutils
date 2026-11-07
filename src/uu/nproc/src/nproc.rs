@@ -7,7 +7,7 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::env;
-use std::io::{Write, stdout};
+use std::io::Write;
 use uucore::{
     error::{UResult, USimpleError, strip_errno},
     format_usage, translate,
@@ -18,6 +18,19 @@ static OPT_IGNORE: &str = "ignore";
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    nproc(args, &mut std::io::stdout().lock())
+}
+
+/// Runs nproc like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    nproc(args, stdout)
+}
+
+fn nproc(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     #[allow(clippy::unwrap_used, reason = "clap provides 0 by default")]
     let ignore = *matches.get_one::<usize>(OPT_IGNORE).unwrap();
@@ -41,7 +54,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     cores = cores.saturating_sub(ignore).clamp(1, limit);
     //discard error about stdout flush
-    stdout()
+    stdout
         .write_all(format!("{cores}\n").as_bytes())
         .map_err(|e| USimpleError::new(1, strip_errno(&e)))
 }

@@ -386,6 +386,23 @@ fn parse_military_timezone_with_offset(s: &str) -> Option<(i32, DayDelta)> {
 #[uucore::main]
 #[allow(clippy::cognitive_complexity)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    date_with(
+        args,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// Runs date like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    date_with(args, stdin, stdout)
+}
+
+fn date_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let matches =
         uucore::clap_localization::handle_clap_result(uu_app(), normalize_iso_8601_args(args))?;
 
@@ -488,7 +505,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     if let Some(input) = matches.get_one::<String>(OPT_SET) {
-        return set_and_echo(input, &now, &settings);
+        return set_and_echo(input, &now, &settings, stdout);
     }
 
     let output_time_zone = now.time_zone().clone();
@@ -617,11 +634,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             let iter = std::iter::once(date);
             Box::new(iter)
         }
-        DateSource::Stdin => parse_dates_from_reader(
-            std::io::stdin(),
-            &now,
-            DebugOptions::new(settings.debug, true),
-        ),
+        DateSource::Stdin => {
+            parse_dates_from_reader(&mut *stdin, &now, DebugOptions::new(settings.debug, true))
+        }
         DateSource::File(ref path) => {
             if path.is_dir() {
                 return Err(Box::new(DateError::ExpectedFileGotDirectory {
@@ -663,7 +678,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     let output = OutputContext::new(&settings);
-    let mut stdout = BufWriter::new(std::io::stdout().lock());
+    let mut stdout = BufWriter::new(&mut *stdout);
 
     // Format all the dates
     for date in dates {
@@ -1126,7 +1141,12 @@ fn write_formatted_bytes<W: Write>(
 
 /// Set the clock, then echo the resulting date like GNU does (issue #14677).
 /// Report a set failure first, so it isn't lost when the echo write fails.
-fn set_and_echo(input: &str, now: &Zoned, settings: &Settings) -> UResult<()> {
+fn set_and_echo(
+    input: &str,
+    now: &Zoned,
+    settings: &Settings,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     match parse_date(input, now, DebugOptions::new(settings.debug, true)) {
         Ok(ParsedDateTime::InRange(date)) => {
             show_if_err!(set_system_datetime(convert_for_set(
@@ -1135,7 +1155,7 @@ fn set_and_echo(input: &str, now: &Zoned, settings: &Settings) -> UResult<()> {
             )));
 
             let output = OutputContext::new(settings);
-            let mut stdout = BufWriter::new(std::io::stdout().lock());
+            let mut stdout = BufWriter::new(&mut *stdout);
             write_formatted_date(&mut stdout, date, &output, settings)?;
             stdout.flush().map_err(DateError::Write)?;
             Ok(())
@@ -1631,12 +1651,12 @@ fn try_parse_with_abbreviation<S: AsRef<str>>(date_str: S, now: &Zoned) -> Optio
 ///
 /// Takes any `Read` source, reads it line by line, and parses each line as a date.
 /// Returns a boxed iterator over the parse results.
-fn parse_dates_from_reader<R: Read + 'static>(
+fn parse_dates_from_reader<'a, R: Read + 'a>(
     reader: R,
-    now: &Zoned,
+    now: &'a Zoned,
     dbg_opts: DebugOptions,
 ) -> Box<
-    dyn Iterator<Item = Result<ParsedDateTime, (String, parse_datetime::ParseDateTimeError)>> + '_,
+    dyn Iterator<Item = Result<ParsedDateTime, (String, parse_datetime::ParseDateTimeError)>> + 'a,
 > {
     let lines = BufReader::new(reader).split(b'\n');
     Box::new(lines.map_while(Result::ok).map(move |mut bytes| {

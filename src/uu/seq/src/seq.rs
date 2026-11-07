@@ -6,7 +6,7 @@
 // spell-checker:ignore (ToDO) bigdecimal extendedbigdecimal numberparse hexadecimalfloat biguint
 
 use std::ffi::{OsStr, OsString};
-use std::io::{BufWriter, Write, stdout};
+use std::io::{BufWriter, Write};
 
 use clap::{Arg, ArgAction, Command};
 use num_bigint::BigUint;
@@ -151,6 +151,19 @@ fn select_precision(
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    seq_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs seq like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    seq_with(args, stdout)
+}
+
+fn seq_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let raw_args: Vec<OsString> = args.collect();
     // Captured before `-f%q` is split into two arguments, so that the caret
     // echoes the command line as it was typed.
@@ -276,6 +289,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         &format,
         fast_allowed,
         padding,
+        stdout,
     );
 
     match result {
@@ -425,8 +439,8 @@ fn print_seq(
     format: &Format<num_format::Float, &ExtendedBigDecimal>,
     fast_allowed: bool,
     padding: usize, // Used by fast path only
+    stdout: &mut dyn Write,
 ) -> std::io::Result<()> {
-    let stdout = stdout().lock();
     let mut stdout = BufWriter::new(stdout);
     let (first, increment, last) = range;
 

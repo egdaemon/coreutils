@@ -7,7 +7,7 @@
 
 use clap::builder::{TypedValueParser, ValueParserFactory};
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use uucore::display::{Quotable, println_verbatim};
+use uucore::display::{Quotable, writeln_verbatim};
 use uucore::error::{FromIo, UError, UResult, UUsageError};
 use uucore::translate;
 use uucore::{format_usage, os_str_from_bytes};
@@ -355,6 +355,19 @@ impl ValueParserFactory for OptionalPathBufParser {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    mktemp_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs mktemp like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    mktemp_with(args, stdout)
+}
+
+fn mktemp_with(args: impl uucore::Args, stdout: &mut dyn std::io::Write) -> UResult<()> {
     let args: Vec<_> = args.collect();
     let matches = uu_app().try_get_matches_from(&args).map_err(|e| {
         use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -388,7 +401,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     let path = mktemp(&options)?;
-    if let Err(e) = println_verbatim(&path) {
+    if let Err(e) = writeln_verbatim(stdout, &path) {
         // The caller never learns the name, so leaving the file behind would
         // litter the temporary directory with something nothing can clean up.
         if !options.dry_run {

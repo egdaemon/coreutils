@@ -19,6 +19,19 @@ static OPT_PATH: &str = "FILE";
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    unlink_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs unlink like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    unlink_with(args, stdout)
+}
+
+fn unlink_with(args: impl uucore::Args, _stdout: &mut dyn std::io::Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let path: &Path = matches.get_one::<OsString>(OPT_PATH).unwrap().as_ref();

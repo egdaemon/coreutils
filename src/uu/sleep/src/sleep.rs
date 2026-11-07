@@ -20,6 +20,19 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    sleep_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs sleep like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    sleep_with(args, stdout)
+}
+
+fn sleep_with(args: impl uucore::Args, _stdout: &mut dyn std::io::Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     #[expect(clippy::unwrap_used, reason = "set as required by clap")]

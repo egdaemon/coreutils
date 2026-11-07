@@ -151,6 +151,19 @@ pub mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    truncate_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs truncate like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    truncate_with(args, stdout)
+}
+
+fn truncate_with(args: impl uucore::Args, _stdout: &mut dyn std::io::Write) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in size diagnostics, which needs the size as typed.
     let diag_args = uucore::diagnostics::capture(&args);

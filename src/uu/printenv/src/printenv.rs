@@ -8,7 +8,7 @@ use std::io::Write;
 
 use clap::{Arg, ArgAction, Command};
 
-use uucore::display::{OsWrite, print_all_env_vars};
+use uucore::display::{OsWrite, write_all_env_vars};
 use uucore::error::UResult;
 use uucore::line_ending::LineEnding;
 use uucore::{format_usage, translate};
@@ -19,6 +19,19 @@ static ARG_VARIABLES: &str = "variables";
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    printenv(args, &mut std::io::stdout().lock())
+}
+
+/// Runs printenv like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    printenv(args, stdout)
+}
+
+fn printenv(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result_with_exit_code(uu_app(), args, 2)?;
 
     let variables: Vec<String> = matches
@@ -29,7 +42,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let separator = LineEnding::from_zero_flag(matches.get_flag(OPT_NULL));
 
     if variables.is_empty() {
-        print_all_env_vars(separator)?;
+        write_all_env_vars(stdout, separator)?;
         return Ok(());
     }
 
@@ -41,7 +54,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             continue;
         }
         if let Some(var) = env::var_os(env_var) {
-            let mut stdout = std::io::stdout().lock();
             stdout.write_all_os(&var)?;
             write!(stdout, "{separator}")?;
         } else {

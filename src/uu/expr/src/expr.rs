@@ -20,7 +20,7 @@
 )]
 
 use clap::{Arg, ArgAction, Command};
-use std::io::{Write, stdout};
+use std::io::Write;
 use syntax_tree::{AstNode, is_truthy};
 use uucore::os_string_to_vec;
 use uucore::translate;
@@ -137,6 +137,19 @@ fn evaluate(args: &[Vec<u8>]) -> Result<Vec<u8>, (ExprError, FailurePoint)> {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    expr(args, &mut std::io::stdout().lock())
+}
+
+/// Runs expr like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    expr(args, stdout)
+}
+
+fn expr(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     // For expr utility we do not want getopts.
     // The following usage should work without escaping hyphens: `expr -15 = 1 + 2 \* \( 3 - -4 \)`
     let args = args
@@ -146,8 +159,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let mut args = &args[..];
     match args {
-        [a] if a == b"--help" => uu_app().print_help()?,
-        [a] if a == b"--version" => writeln!(stdout(), "expr {}", uucore::crate_version!())?,
+        [a] if a == b"--help" => write!(stdout, "{}", uu_app().render_help())?,
+        [a] if a == b"--version" => writeln!(stdout, "expr {}", uucore::crate_version!())?,
         _ => {
             // ignore -- as the 1st argument
             if let [a, rest @ ..] = args
@@ -160,8 +173,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 let reported = uucore::diagnostics::enabled() && diagnostics::render(args, &e, &at);
                 uucore::error::quiet_if_reported(reported, e)
             })?;
-            stdout().write_all(&res)?;
-            if let Err(e) = stdout().write_all(b"\n") {
+            stdout.write_all(&res)?;
+            if let Err(e) = stdout.write_all(b"\n") {
                 show_error!("{}", strip_errno(&e));
                 return Err(3.into());
             }

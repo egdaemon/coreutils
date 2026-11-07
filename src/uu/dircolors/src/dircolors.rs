@@ -10,7 +10,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write, stdout};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -113,6 +113,27 @@ fn generate_ls_colors(fmt: &OutputFmt, sep: &str) -> String {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    dircolors_with(
+        args,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// Runs dircolors like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    dircolors_with(args, stdin, stdout)
+}
+
+fn dircolors_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let files = matches
@@ -145,7 +166,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             ));
         }
 
-        writeln!(stdout(), "{}", generate_dircolors_config())?;
+        writeln!(stdout, "{}", generate_dircolors_config())?;
         return Ok(());
     }
 
@@ -165,7 +186,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     match files.as_slice() {
         [] => {
-            writeln!(stdout(), "{}", generate_ls_colors(&out_format, ":"))?;
+            writeln!(stdout, "{}", generate_ls_colors(&out_format, ":"))?;
             Ok(())
         }
         [_file_arg, extra, ..] => Err(UUsageError::new(
@@ -174,7 +195,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         )),
         [file_arg] => {
             let result = if *file_arg == "-" {
-                let fin = BufReader::new(std::io::stdin());
+                let fin = BufReader::new(&mut *stdin);
                 // For example, for echo "owt 40;33"|dircolors -b -
                 parse(fin.lines().map_while(Result::ok), &out_format, "-")
             } else {
@@ -196,7 +217,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             };
 
             let string = result.map_err(|s| USimpleError::new(1, s))?;
-            writeln!(stdout(), "{string}")?;
+            writeln!(stdout, "{string}")?;
             Ok(())
         }
     }

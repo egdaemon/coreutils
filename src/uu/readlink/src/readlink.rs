@@ -9,7 +9,7 @@ use clap::{Arg, ArgAction, Command};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Write, stdout};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult};
@@ -32,6 +32,19 @@ const ARG_FILES: &str = "files";
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    readlink_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs readlink like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    readlink_with(args, stdout)
+}
+
+fn readlink_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let mut no_trailing_delimiter = matches.get_flag(OPT_NO_NEWLINE);
@@ -88,7 +101,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
         match path_result {
             Ok(path) => {
-                show(&path, line_ending).map_err_context(String::new)?;
+                show(&path, line_ending, stdout).map_err_context(String::new)?;
             }
             Err(err) => {
                 failed = true;
@@ -182,10 +195,14 @@ pub fn uu_app() -> Command {
         )
 }
 
-fn show(path: &Path, line_ending: Option<LineEnding>) -> std::io::Result<()> {
-    uucore::display::print_verbatim(path)?;
+fn show(
+    path: &Path,
+    line_ending: Option<LineEnding>,
+    stdout: &mut dyn Write,
+) -> std::io::Result<()> {
+    uucore::display::write_verbatim(stdout, path)?;
     if let Some(line_ending) = line_ending {
-        write!(stdout(), "{line_ending}")?;
+        write!(stdout, "{line_ending}")?;
     }
-    stdout().flush()
+    stdout.flush()
 }

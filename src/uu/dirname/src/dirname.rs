@@ -5,9 +5,8 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::ffi::{OsStr, OsString};
-use std::io::{Write as _, stdout};
 #[cfg(unix)]
-use uucore::display::print_verbatim;
+use uucore::display::write_verbatim;
 use uucore::error::{UResult, UUsageError};
 use uucore::format_usage;
 use uucore::line_ending::LineEnding;
@@ -152,6 +151,19 @@ fn dirname_string_manipulation(path: &OsStr) -> &[u8] {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    dirname(args, &mut std::io::stdout().lock())
+}
+
+/// Runs dirname like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    dirname(args, stdout)
+}
+
+fn dirname(args: impl uucore::Args, stdout: &mut dyn std::io::Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let line_ending = LineEnding::from_zero_flag(matches.get_flag(options::ZERO));
@@ -170,20 +182,20 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         {
             use std::os::unix::ffi::OsStrExt;
             let result_os = OsStr::from_bytes(result);
-            print_verbatim(result_os)?;
+            write_verbatim(stdout, result_os)?;
         }
         #[cfg(not(unix))]
         {
             // On non-Unix, fall back to lossy conversion
             if let Ok(s) = std::str::from_utf8(result) {
-                write!(stdout(), "{s}")?;
+                write!(stdout, "{s}")?;
             } else {
                 // Fallback for non-UTF-8 paths on non-Unix systems
-                write!(stdout(), ".")?;
+                write!(stdout, ".")?;
             }
         }
 
-        write!(stdout(), "{line_ending}")?;
+        write!(stdout, "{line_ending}")?;
     }
 
     Ok(())

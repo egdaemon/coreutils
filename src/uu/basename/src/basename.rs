@@ -8,7 +8,7 @@
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
-use std::io::{Write, stdout};
+use std::io::Write;
 use std::path::{PathBuf, is_separator};
 use uucore::display::Quotable;
 use uucore::error::{UResult, UUsageError};
@@ -26,6 +26,19 @@ pub mod options {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    basename_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs basename like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    basename_with(args, stdout)
+}
+
+fn basename_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     //
     // Argument parsing
     //
@@ -66,9 +79,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     //
 
     for path in name_args {
-        let mut out = stdout();
-        out.write_all(&basename(path, &suffix)?)?;
-        write!(out, "{line_ending}")?;
+        stdout.write_all(&basename(path, &suffix)?)?;
+        write!(stdout, "{line_ending}")?;
     }
 
     Ok(())

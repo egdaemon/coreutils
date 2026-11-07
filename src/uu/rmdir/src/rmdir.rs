@@ -25,6 +25,19 @@ static ARG_DIRS: &str = "dirs";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    rmdir_with(args, &mut io::stdout().lock())
+}
+
+/// Runs rmdir like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    rmdir_with(args, stdout)
+}
+
+fn rmdir_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let opts = Opts {
@@ -39,7 +52,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .unwrap_or_default()
         .map(Path::new)
     {
-        if let Err(error) = remove(path, opts, &mut verbose_result) {
+        if let Err(error) = remove(path, opts, &mut verbose_result, stdout) {
             let Error { error, path } = error;
 
             if opts.ignore && dir_not_empty(&error, path) {
@@ -101,15 +114,16 @@ fn remove<'a>(
     mut path: &'a Path,
     opts: Opts,
     verbose_result: &mut io::Result<()>,
+    stdout: &mut dyn Write,
 ) -> Result<(), Error<'a>> {
-    remove_single(path, opts, verbose_result)?;
+    remove_single(path, opts, verbose_result, stdout)?;
     if opts.parents {
         while let Some(new) = path.parent() {
             path = new;
             if path.as_os_str().is_empty() {
                 break;
             }
-            remove_single(path, opts, verbose_result)?;
+            remove_single(path, opts, verbose_result, stdout)?;
         }
     }
     Ok(())
@@ -119,11 +133,12 @@ fn remove_single<'a>(
     path: &'a Path,
     opts: Opts,
     verbose_result: &mut io::Result<()>,
+    stdout: &mut dyn Write,
 ) -> Result<(), Error<'a>> {
     // Defer reporting a write error until all directory removals have been attempted.
     if opts.verbose && verbose_result.is_ok() {
         *verbose_result = writeln!(
-            io::stdout(),
+            stdout,
             "{}",
             translate!("rmdir-verbose-removing-directory", "util_name" => "rmdir", "path" => path.quote())
         );

@@ -19,6 +19,19 @@ pub mod options {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    link_with(args, &mut std::io::stdout().lock())
+}
+
+/// Runs link like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn std::io::Read,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    link_with(args, stdout)
+}
+
+fn link_with(args: impl uucore::Args, _stdout: &mut dyn std::io::Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     let files: Vec<_> = matches
         .get_many::<OsString>(options::FILES)
