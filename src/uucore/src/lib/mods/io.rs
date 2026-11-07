@@ -126,6 +126,54 @@ impl From<OwnedFileDescriptorOrHandle> for Stdio {
     }
 }
 
+/// The standard streams a utility prompts on and reports to: the process's own, or the ones its
+/// caller gives in their place.
+pub enum Streams<'a> {
+    Process(io::Stdout),
+    Given {
+        stdin: io::BufReader<Box<dyn io::Read>>,
+        stdout: &'a mut dyn io::Write,
+    },
+}
+
+impl<'a> Streams<'a> {
+    /// The process's own streams.
+    pub fn process() -> Self {
+        Self::Process(io::stdout())
+    }
+
+    /// The streams a caller gives, in place of the process's.
+    pub fn given(stdin: Box<dyn io::Read>, stdout: &'a mut dyn io::Write) -> Self {
+        Self::Given {
+            stdin: io::BufReader::new(stdin),
+            stdout,
+        }
+    }
+
+    /// Where the utility writes its output.
+    pub fn stdout(&mut self) -> &mut dyn io::Write {
+        match self {
+            Self::Process(stdout) => stdout,
+            Self::Given { stdout, .. } => *stdout,
+        }
+    }
+
+    /// Whether stdin is a terminal. A caller's stdin never is.
+    pub fn stdin_is_terminal(&self) -> bool {
+        use io::IsTerminal;
+        matches!(self, Self::Process(_)) && io::stdin().is_terminal()
+    }
+
+    /// Reads a line of stdin and checks whether it starts with `'y'` or `'Y'`, see
+    /// [`crate::read_yes`].
+    pub fn read_yes(&mut self) -> bool {
+        match self {
+            Self::Process(_) => crate::read_yes(),
+            Self::Given { stdin, .. } => crate::read_yes_from(stdin),
+        }
+    }
+}
+
 /// The standard streams of a utility run in isolation, in place of the process's own.
 struct Isolated {
     stdin: io::BufReader<Box<dyn io::Read>>,
