@@ -32,7 +32,7 @@ which write their output as each chunk of stdin arrives.
 | false     | no           | shell builtin |
 | fmt       | yes          |        |
 | fold      | yes          |        |
-| head      | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| head      | yes          |        |
 | hostid    | yes          |        |
 | join      | yes          |        |
 | link      | yes          |        |

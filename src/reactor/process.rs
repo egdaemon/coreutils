@@ -73,6 +73,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "factor" => factor,
             "fmt" => fmt,
             "fold" => fold,
+            "head" => head,
             "hostid" => hostid,
             "join" => join,
             "link" => link,
@@ -362,6 +363,45 @@ mod tests {
             exec(&["paste", "-", "-"], b"a\nb\nc\nd\n"),
             (0, b"a\tb\nc\td\n".to_vec(), Vec::new())
         );
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_takes_the_first_lines_of_stdin() {
+        assert_eq!(
+            exec(&["head", "-n", "2"], b"a\nb\nc\n"),
+            (0, b"a\nb\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_drops_the_last_bytes_of_stdin() {
+        assert_eq!(
+            exec(&["head", "-c", "-2"], b"abcd"),
+            (0, b"ab".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_names_each_file_it_reads() {
+        let dir = env::temp_dir().join(format!("reactor-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"1\n2\n").unwrap();
+
+        let (code, stdout, stderr) =
+            exec(&["head", "-n", "1", file.to_str().unwrap(), "-"], b"x\ny\n");
+        let expected = format!(
+            "==> {} <==\n1\n\n==> 'standard input' <==\nx\n",
+            file.display()
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "pwd")]
