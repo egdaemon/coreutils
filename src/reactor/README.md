@@ -21,7 +21,7 @@ which write their output as each chunk of stdin arrives.
 | csplit    | yes          |        |
 | cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | date      | yes          |        |
-| dd        | no           | operates on file descriptors directly |
+| dd        | yes          | its statistics go to the reactor's stderr |
 | dir       | no           | layout and colour depend on the terminal |
 | dircolors | yes          |        |
 | dirname   | yes          |        |

@@ -67,6 +67,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "cp" => cp,
             "csplit" => csplit,
             "date" => date,
+            "dd" => dd,
             "dircolors" => dircolors,
             "dirname" => dirname,
             "echo" => echo,
@@ -635,6 +636,45 @@ mod tests {
         let (code, _, _) = exec(&["rm", "-i", &file], b"y\n");
         assert_eq!(code, 0);
         assert!(!std::path::Path::new(&file).exists());
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_copies_blocks_of_stdin() {
+        let (code, stdout, _) = exec(
+            &[
+                "dd",
+                "bs=2",
+                "skip=1",
+                "count=2",
+                "conv=ucase",
+                "status=none",
+            ],
+            b"abcdefgh",
+        );
+        assert_eq!((code, stdout), (0, b"CDEF".to_vec()));
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_pads_its_stdout_to_seek() {
+        let (code, stdout, _) = exec(&["dd", "bs=1", "seek=2", "status=none"], b"x");
+        assert_eq!((code, stdout), (0, b"\0\0x".to_vec()));
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_copies_a_file_to_stdout_and_stdin_to_a_file() {
+        let dir = Scratch::new("dd");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"file").unwrap();
+
+        let (code, stdout, _) = exec(&["dd", &format!("if={src}"), "status=none"], b"");
+        assert_eq!((code, stdout), (0, b"file".to_vec()));
+
+        let (code, stdout, _) = exec(&["dd", &format!("of={dst}"), "status=none"], b"stdin");
+        assert_eq!((code, stdout), (0, Vec::new()));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"stdin");
     }
 
     #[cfg(feature = "pwd")]
