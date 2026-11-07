@@ -11,11 +11,12 @@ use uu_checksum_common::{ChecksumCommand, checksum_main, default_checksum_app, o
 
 use uucore::checksum::compute::{DigestFormat, OutputFormat};
 use uucore::checksum::{
-    AlgoKind, BlakeLength, ChecksumError, HashLength, ReadingMode, Streams, parse_blake_length,
+    AlgoKind, BlakeLength, ChecksumError, HashLength, ReadingMode, parse_blake_length,
     sanitize_sha2_sha3_length_str,
 };
 use uucore::error::UResult;
 use uucore::hardware::{HasHardwareFeatures as _, SimdPolicy};
+use uucore::io::Streams;
 use uucore::{show_error, translate};
 
 /// Print CPU hardware capability detection information to stderr

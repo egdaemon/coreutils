@@ -6,7 +6,7 @@
 // spell-checker:ignore bitlen
 
 use std::ffi::OsStr;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::num::IntErrorKind;
 
 use os_display::Quotable;
@@ -20,39 +20,6 @@ use crate::{show_error, translate, translate_text};
 
 pub mod compute;
 pub mod validate;
-
-/// The streams a checksum utility reads `-` from and writes its results to.
-pub enum Streams<'a> {
-    /// The process's own standard streams.
-    Process(io::Stdout),
-    /// Streams the caller gives in place of the process's, its stdin is read only once.
-    Given(Option<Box<dyn Read>>, &'a mut dyn Write),
-}
-
-impl<'a> Streams<'a> {
-    pub fn process() -> Self {
-        Self::Process(io::stdout())
-    }
-
-    pub fn given(stdin: Box<dyn Read>, stdout: &'a mut dyn Write) -> Self {
-        Self::Given(Some(stdin), stdout)
-    }
-
-    /// Takes stdin to read `-` from.
-    fn stdin(&mut self) -> Box<dyn Read> {
-        match self {
-            Self::Process(_) => Box::new(io::stdin()),
-            Self::Given(stdin, _) => stdin.take().unwrap_or_else(|| Box::new(io::empty())),
-        }
-    }
-
-    fn stdout(&mut self) -> &mut dyn Write {
-        match self {
-            Self::Process(stdout) => stdout,
-            Self::Given(_, stdout) => *stdout,
-        }
-    }
-}
 
 pub const ALGORITHM_OPTIONS_SYSV: &str = "sysv";
 pub const ALGORITHM_OPTIONS_BSD: &str = "bsd";

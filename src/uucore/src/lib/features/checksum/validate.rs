@@ -16,9 +16,10 @@ use os_display::Quotable;
 
 use crate::checksum::{
     AlgoKind, BlakeLength, ChecksumError, HashLength, ReadingMode, ShaLength, SizedAlgoKind,
-    Streams, digest_reader, parse_blake_length, unescape_filename,
+    digest_reader, parse_blake_length, unescape_filename,
 };
 use crate::error::{FromIo, UError, UResult, USimpleError, strip_errno};
+use crate::io::Streams;
 use crate::quoting_style::locale_aware_shell_escape;
 use crate::sum::{self, Blake2b, Blake3, DigestOutput};
 use crate::{
@@ -598,7 +599,7 @@ fn get_file_to_check(
     streams: &mut Streams,
 ) -> Result<Box<dyn Read>, LineCheckError> {
     if filename == "-" {
-        Ok(streams.stdin()) // Use stdin if "-" is specified in the checksum file
+        Ok(streams.take_stdin()) // Use stdin if "-" is specified in the checksum file
     } else {
         let mut failed_open = || {
             let _ = write_file_report(
@@ -949,7 +950,7 @@ fn process_checksum_file(
 
     let file: Box<dyn Read> = if input_is_stdin {
         // Use stdin if "-" is specified
-        streams.stdin()
+        streams.take_stdin()
     } else {
         match get_input_file(filename_input) {
             Ok(f) => f,

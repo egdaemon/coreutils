@@ -15,8 +15,9 @@ use uucore::checksum::compute::{
     ChecksumComputeOptions, OutputFormat, perform_checksum_computation,
 };
 use uucore::checksum::validate::{self, ChecksumValidateOptions, ChecksumVerbose};
-use uucore::checksum::{AlgoKind, ChecksumError, HashLength, SizedAlgoKind, Streams};
+use uucore::checksum::{AlgoKind, ChecksumError, HashLength, SizedAlgoKind};
 use uucore::error::UResult;
+use uucore::io::Streams;
 use uucore::line_ending::LineEnding;
 use uucore::{crate_version, format_usage, localized_help_template, util_name};
 
@@ -43,7 +44,7 @@ macro_rules! declare_standalone {
                 $kind,
                 uu_app(),
                 args,
-                &mut ::uucore::checksum::Streams::process(),
+                &mut ::uucore::io::Streams::process(),
             )
         }
 
@@ -57,7 +58,7 @@ macro_rules! declare_standalone {
                 $kind,
                 uu_app(),
                 args,
-                &mut ::uucore::checksum::Streams::given(stdin, stdout),
+                &mut ::uucore::io::Streams::given(stdin, stdout),
             )
         }
 

@@ -10,8 +10,9 @@ use std::io::{Read, Write};
 
 use uu_checksum_common::{standalone_checksum_app_with_length, standalone_with_length_main};
 
-use uucore::checksum::{AlgoKind, BlakeLength, Streams, parse_blake_length};
+use uucore::checksum::{AlgoKind, BlakeLength, parse_blake_length};
 use uucore::error::UResult;
+use uucore::io::Streams;
 use uucore::translate;
 
 #[uucore::main]

@@ -11,9 +11,10 @@ use std::io;
 use std::path::Path;
 
 use crate::checksum::{
-    AlgoKind, ChecksumError, ReadingMode, SizedAlgoKind, Streams, digest_reader, escape_filename,
+    AlgoKind, ChecksumError, ReadingMode, SizedAlgoKind, digest_reader, escape_filename,
 };
 use crate::error::{FromIo, UResult, USimpleError};
+use crate::io::Streams;
 use crate::line_ending::LineEnding;
 use crate::quoting_style::locale_aware_shell_escape;
 use crate::sum::DigestOutput;
@@ -242,7 +243,7 @@ where
         let mut file = io::BufReader::with_capacity(
             READ_BUFFER_SIZE,
             if filename == "-" {
-                streams.stdin()
+                streams.take_stdin()
             } else {
                 let filepath = Path::new(filename);
                 if filepath.is_dir() {
