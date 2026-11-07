@@ -103,6 +103,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "truncate" => truncate,
             "true" => r#true,
             "tsort" => tsort,
+            "tty" => tty,
             "uname" => uname,
             "unexpand" => unexpand,
             "uniq" => uniq,
@@ -559,6 +560,18 @@ mod tests {
     fn test_has_no_terminals() {
         assert_eq!(exec(&["test", "-t", "0"], b""), (1, Vec::new(), Vec::new()));
         assert_eq!(exec(&["test", "-t", "1"], b""), (1, Vec::new(), Vec::new()));
+    }
+
+    #[cfg(feature = "tty")]
+    #[test]
+    fn tty_is_not_a_terminal() {
+        // the reactor sets up the utility's messages before running it.
+        super::super::invocation("tty", &"tty".into()).unwrap();
+        assert_eq!(
+            exec(&["tty"], b""),
+            (1, b"not a tty\n".to_vec(), Vec::new())
+        );
+        assert_eq!(exec(&["tty", "-s"], b""), (1, Vec::new(), Vec::new()));
     }
 
     #[cfg(feature = "pwd")]

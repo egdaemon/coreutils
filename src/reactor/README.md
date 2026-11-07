@@ -79,7 +79,7 @@ which write their output as each chunk of stdin arrives.
 | true      | yes          |        |
 | truncate  | yes          |        |
 | tsort     | yes          |        |
-| tty       | no           | needs a terminal |
+| tty       | yes          | not a tty: a process has no terminal |
 | uname     | yes          |        |
 | unexpand  | yes          |        |
 | uniq      | yes          |        |
