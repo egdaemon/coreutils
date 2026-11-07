@@ -100,6 +100,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "tac" => tac,
             "tail" => tail,
             "test" => uu_test,
+            "touch" => touch,
             "tr" => tr,
             "truncate" => truncate,
             "true" => r#true,
@@ -529,6 +530,13 @@ mod tests {
         assert!(!stderr.is_empty());
     }
 
+    /// A directory of its own for a test of `util`.
+    fn scratch(util: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("reactor-{util}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[cfg(feature = "true")]
     #[test]
     fn true_succeeds() {
@@ -582,6 +590,42 @@ mod tests {
             exec(&["pathchk", "-p", "a/b.c"], b""),
             (0, Vec::new(), Vec::new())
         );
+    }
+
+    #[cfg(feature = "touch")]
+    #[test]
+    fn touch_creates_a_file() {
+        let dir = scratch("touch");
+        let file = dir.join("f");
+
+        assert_eq!(
+            exec(&["touch", file.to_str().unwrap()], b""),
+            (0, Vec::new(), Vec::new())
+        );
+        assert!(file.is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "touch")]
+    #[test]
+    fn touch_stops_at_stdout() {
+        let dir = scratch("touch-stdout");
+        let (before, after) = (dir.join("before"), dir.join("after"));
+
+        let (code, stdout, stderr) = exec(
+            &[
+                "touch",
+                before.to_str().unwrap(),
+                "-",
+                after.to_str().unwrap(),
+            ],
+            b"",
+        );
+        assert_eq!((code, stdout), (1, Vec::new()));
+        assert!(String::from_utf8(stderr).unwrap().contains("'-'"));
+        assert!(before.is_file());
+        assert!(!after.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "pwd")]

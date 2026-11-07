@@ -74,7 +74,7 @@ which write their output as each chunk of stdin arrives.
 | tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |
 | tee       | yes, streams |        |
 | test      | yes          | `-t` is false: a process has no terminal |
-| touch     | no           | not ported yet |
+| touch     | yes          | `-` fails: stdout is the guest's socket |
 | tr        | yes          |        |
 | true      | yes          |        |
 | truncate  | yes          |        |
