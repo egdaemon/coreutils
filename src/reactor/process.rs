@@ -96,6 +96,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "rm" => rm,
             "rmdir" => rmdir,
             "seq" => seq,
+            "shred" => shred,
             "shuf" => shuf,
             "sleep" => sleep,
             "sum" => sum,
@@ -675,6 +676,30 @@ mod tests {
         let (code, stdout, _) = exec(&["dd", &format!("of={dst}"), "status=none"], b"stdin");
         assert_eq!((code, stdout), (0, Vec::new()));
         assert_eq!(std::fs::read(&dst).unwrap(), b"stdin");
+    }
+
+    #[cfg(feature = "shred")]
+    #[test]
+    fn shred_overwrites_a_file_with_zeros() {
+        let dir = Scratch::new("shred-zero");
+        let file = dir.path("f");
+        std::fs::write(&file, b"secret").unwrap();
+
+        let (code, stdout, stderr) = exec(&["shred", "-n", "0", "-z", "-x", &file], b"");
+        assert_eq!((code, stdout, stderr), (0, Vec::new(), Vec::new()));
+        assert_eq!(std::fs::read(&file).unwrap(), b"\0\0\0\0\0\0");
+    }
+
+    #[cfg(feature = "shred")]
+    #[test]
+    fn shred_removes_a_file() {
+        let dir = Scratch::new("shred-remove");
+        let file = dir.path("f");
+        std::fs::write(&file, b"secret").unwrap();
+
+        let (code, _, _) = exec(&["shred", "-n", "1", "-u", &file], b"");
+        assert_eq!(code, 0);
+        assert!(!std::path::Path::new(&file).exists());
     }
 
     #[cfg(feature = "pwd")]

@@ -64,7 +64,7 @@ which write their output as each chunk of stdin arrives.
 | sha256sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | sha384sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | sha512sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| shred     | no           | operates on file descriptors directly |
+| shred     | yes          | `-` fails: the caller's stdout is a stream, not a file to overwrite |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
 | sort      | no           | `--compress-program` runs another program |

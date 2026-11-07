@@ -256,6 +256,20 @@ impl BytesWriter {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    shred(args, false)
+}
+
+/// Runs shred like [`uumain`], isolated from the process's standard streams. `-` names the
+/// caller's stdout, a stream shred can not overwrite in place, so it is refused like a pipe.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    _stdout: &mut dyn Write,
+) -> UResult<()> {
+    shred(args, true)
+}
+
+fn shred(args: impl uucore::Args, isolated: bool) -> UResult<()> {
     // The command line is kept for the caret in size diagnostics, which needs
     // the size as typed.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
@@ -320,6 +334,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     for path_str in matches.get_many::<OsString>(options::FILE).unwrap() {
+        if isolated && path_str == "-" {
+            uucore::show!(USimpleError::new(
+                1,
+                translate_text!("shred-invalid-file-type", "file" => Path::new(path_str).maybe_quote()),
+            ));
+            continue;
+        }
         show_if_err!(wipe_file(path_str, &wipe_options, random_source.as_ref()));
     }
     Ok(())
