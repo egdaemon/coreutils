@@ -136,7 +136,7 @@ thread_local! {
     static ISOLATED: std::cell::RefCell<Option<Isolated>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Runs `f` with `stdin` in place of the process's stdin for [`crate::read_yes`] and
+/// Runs `f` with `stdin` in place of the process's stdin for [`stdin`], [`crate::read_yes`] and
 /// [`stdin_is_terminal`], then writes what `f` wrote to [`stdout`] to `stdout`. For utilities whose
 /// prompts and messages are spread too deep to thread their streams through.
 pub fn isolate<T>(
@@ -169,6 +169,23 @@ pub(crate) fn read_line_isolated(s: &mut String) -> Option<io::Result<usize>> {
 pub fn stdin_is_terminal() -> bool {
     use io::IsTerminal;
     ISOLATED.with_borrow(Option::is_none) && io::stdin().is_terminal()
+}
+
+/// The process's stdin, or the stdin of an isolated utility (see [`isolate`]).
+pub struct Stdin;
+
+/// Returns [`Stdin`].
+pub fn stdin() -> Stdin {
+    Stdin
+}
+
+impl io::Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match ISOLATED.with_borrow_mut(|i| i.as_mut().map(|i| io::Read::read(&mut i.stdin, buf))) {
+            Some(n) => n,
+            None => io::Read::read(&mut io::stdin(), buf),
+        }
+    }
 }
 
 /// The process's stdout, or the stdout of an isolated utility (see [`isolate`]).
