@@ -19,6 +19,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::FileTypeExt;
 use uucore::display::Quotable;
 use uucore::error::{UResult, strip_errno};
+use uucore::io::Streams;
 use uucore::translate;
 use uucore::{fast_inc::fast_inc_one, format_usage};
 
@@ -219,24 +220,18 @@ mod options {
     pub static IGNORED_U: &str = "ignored-u";
 }
 
-/// The streams cat reads `-` from and writes to: the process's own, or the ones its caller gives.
-enum Streams<'a> {
-    Process,
-    Given(&'a mut dyn Read, &'a mut dyn Write),
-}
-
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    cat(args, &mut Streams::Process)
+    cat(args, &mut Streams::process())
 }
 
 /// Runs cat like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    mut stdin: Box<dyn Read>,
+    stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    cat(args, &mut Streams::Given(&mut *stdin, stdout))
+    cat(args, &mut Streams::given(stdin, stdout))
 }
 
 fn cat(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
@@ -410,9 +405,9 @@ fn cat_path(
 ) -> CatResult<()> {
     match get_input_type(path)? {
         InputType::StdIn => {
-            if let Streams::Given(stdin, stdout) = streams {
+            if let Streams::Given { stdin, stdout } = streams {
                 let mut handle = InputHandle {
-                    reader: &mut **stdin,
+                    reader: stdin,
                     is_interactive: false,
                 };
                 return cat_handle_to(&mut handle, options, state, *stdout);
@@ -439,7 +434,7 @@ fn cat_path(
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {
             let file = File::open(path)?;
-            if let Streams::Given(_, stdout) = streams {
+            if let Streams::Given { stdout, .. } = streams {
                 let mut handle = InputHandle {
                     reader: file,
                     is_interactive: false,
@@ -482,8 +477,8 @@ where
     }
     if state.skipped_carriage_return {
         match streams {
-            Streams::Process => print!("\r"),
-            Streams::Given(_, stdout) => stdout.write_all(b"\r")?,
+            Streams::Process(_) => print!("\r"),
+            Streams::Given { stdout, .. } => stdout.write_all(b"\r")?,
         }
     }
     if error_messages.is_empty() {
