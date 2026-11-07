@@ -44,6 +44,7 @@ use std::os::windows::{fs::MetadataExt, io::AsHandle};
 use std::path::Path;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, atomic::Ordering::Relaxed, mpsc};
+#[cfg(not(target_os = "wasi"))]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,13 +99,19 @@ impl Alarm {
     pub fn with_interval(interval: Duration) -> Self {
         let trigger = Arc::new(AtomicU8::default());
 
-        let weak_trigger = Arc::downgrade(&trigger);
-        thread::spawn(move || {
-            while let Some(trigger) = weak_trigger.upgrade() {
-                thread::sleep(interval);
-                trigger.store(ALARM_TRIGGER_TIMER, Relaxed);
-            }
-        });
+        // wasi has no threads, so the timer never fires there.
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let weak_trigger = Arc::downgrade(&trigger);
+            thread::spawn(move || {
+                while let Some(trigger) = weak_trigger.upgrade() {
+                    thread::sleep(interval);
+                    trigger.store(ALARM_TRIGGER_TIMER, Relaxed);
+                }
+            });
+        }
+        #[cfg(target_os = "wasi")]
+        let _ = interval;
 
         Self { trigger }
     }
@@ -1208,7 +1215,7 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
     // to the receives `rx`, and the receiver prints the transfer
     // information.
     let (prog_tx, rx) = mpsc::channel();
-    let output_thread = thread::spawn(gen_prog_updater(rx, i.settings.status));
+    let output_thread = reporter(gen_prog_updater(rx, i.settings.status));
 
     // Optimization: if no blocks are to be written, then don't
     // bother allocating any buffers.
@@ -1376,9 +1383,7 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
         // Flushing and syncing are pointless now, but the caller still wants the statistics.
         let prog_update = ProgUpdate::new(rstat, wstat, start.elapsed(), ProgUpdateType::Final);
         prog_tx.send(prog_update).unwrap_or(());
-        output_thread
-            .join()
-            .expect("Failed to join with the output thread.");
+        output_thread();
         return Err(e);
     }
 
@@ -1420,13 +1425,13 @@ fn write_to<'a>(
 }
 
 /// Flush output, print final stats, and join with the progress thread.
-fn finalize<T>(
+fn finalize(
     mut output: BlockWriter,
     rstat: ReadStat,
     wstat: WriteStat,
     start: Instant,
     prog_tx: &mpsc::Sender<ProgUpdate>,
-    output_thread: thread::JoinHandle<T>,
+    output_thread: impl FnOnce(),
 ) -> io::Result<()> {
     // Flush the output in case a partial write has been buffered but
     // not yet written.
@@ -1443,11 +1448,27 @@ fn finalize<T>(
     let prog_update = ProgUpdate::new(rstat, wstat, start.elapsed(), ProgUpdateType::Final);
     prog_tx.send(prog_update).unwrap_or(());
     // Wait for the output thread to finish
-    output_thread
-        .join()
-        .expect("Failed to join with the output thread.");
+    output_thread();
 
     Ok(())
+}
+
+/// Runs the progress updater on a thread of its own, returning the wait for it to finish.
+#[cfg(not(target_os = "wasi"))]
+fn reporter(updater: impl Fn() + Send + 'static) -> impl FnOnce() {
+    let thread = thread::spawn(updater);
+    move || {
+        thread
+            .join()
+            .expect("Failed to join with the output thread.");
+    }
+}
+
+/// wasi has no threads: the updater runs once the copy finishes, reporting the updates the copy
+/// queued on its channel.
+#[cfg(target_os = "wasi")]
+fn reporter(updater: impl Fn()) -> impl FnOnce() {
+    updater
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
