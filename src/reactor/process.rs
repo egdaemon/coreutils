@@ -98,6 +98,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "shuf" => shuf,
             "sleep" => sleep,
             "sort" => sort,
+            "split" => split,
             "sum" => sum,
             "tac" => tac,
             "tail" => tail,
@@ -633,6 +634,50 @@ mod tests {
     fn sort_refuses_a_compress_program() {
         let (code, stdout, stderr) = exec(&["sort", "--compress-program=gzip"], b"b\na\n");
         assert_eq!(code, 2);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_writes_a_chunk_of_stdin_to_stdout() {
+        assert_eq!(
+            exec(&["split", "-n", "2/2"], b"abcd"),
+            (0, b"cd".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_writes_files_and_reports_them() {
+        let dir = env::temp_dir().join(format!("reactor-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("x");
+
+        let (code, stdout, stderr) = exec(
+            &[
+                "split",
+                "-l",
+                "1",
+                "--verbose",
+                "-",
+                prefix.to_str().unwrap(),
+            ],
+            b"a\nb\n",
+        );
+        // the message is localized, so only the report of each file is checked.
+        assert_eq!((code, stderr), (0, Vec::new()));
+        assert_eq!(String::from_utf8(stdout).unwrap().lines().count(), 2);
+        assert_eq!(std::fs::read(dir.join("xaa")).unwrap(), b"a\n");
+        assert_eq!(std::fs::read(dir.join("xab")).unwrap(), b"b\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "split")]
+    #[test]
+    fn split_refuses_a_filter() {
+        let (code, stdout, stderr) = exec(&["split", "--filter=cat"], b"a\n");
+        assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
     }

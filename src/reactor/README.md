@@ -68,7 +68,7 @@ which write their output as each chunk of stdin arrives.
 | shuf      | yes          |        |
 | sleep     | yes          |        |
 | sort      | yes          | `--compress-program` fails: there are no other programs; `-c` and `-m` fail on wasi: they read on threads |
-| split     | no           | `--filter` runs another program |
+| split     | yes          | `--filter` fails: there are no other programs |
 | sum       | yes          |        |
 | tac       | yes          |        |
 | tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |
