@@ -6,14 +6,15 @@
 // spell-checker:ignore (ToDO) srcpath targetpath EEXIST renameat
 
 use clap::{Arg, ArgAction, Command};
-use std::io::{self, BufRead, BufReader, Read, Write, stdout};
+use std::io::{self, Read, Write};
 use uucore::display::Quotable;
 use uucore::error::{UError, UIoError, UResult};
 
 use uucore::fs::replace_link;
 use uucore::fs::{make_path_relative_to, paths_refer_to_same_file};
+use uucore::io::Streams;
 use uucore::translate;
-use uucore::{format_usage, prompt_yes, show_error};
+use uucore::{format_usage, prompt_yes_on, show_error};
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -105,31 +106,10 @@ mod options {
 
 static ARG_FILES: &str = "files";
 
-/// The streams ln asks on before replacing a file, and reports links to with `--verbose`: the
-/// process's own, or the ones its caller gives.
-enum Streams<'a> {
-    Process,
-    Given(&'a mut dyn BufRead, &'a mut dyn Write),
-}
-
-impl Streams<'_> {
-    /// Asks whether to replace `file`.
-    fn replace(&mut self, file: &Path) -> bool {
-        let prompt = translate!("ln-prompt-replace", "file" => file.quote());
-        match self {
-            Self::Process => prompt_yes!("{prompt}"),
-            Self::Given(stdin, _) => {
-                eprint!("{}: {prompt} ", uucore::util_name());
-                uucore::read_yes_from(*stdin)
-            }
-        }
-    }
-}
-
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let (paths, settings) = parse(args)?;
-    exec(&paths[..], &settings, &mut Streams::Process)?;
+    exec(&paths[..], &settings, &mut Streams::process())?;
     Ok(())
 }
 
@@ -140,12 +120,7 @@ pub fn uumain_with(
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     let (paths, settings) = parse(args)?;
-    let mut stdin = BufReader::new(stdin);
-    exec(
-        &paths[..],
-        &settings,
-        &mut Streams::Given(&mut stdin, stdout),
-    )?;
+    exec(&paths[..], &settings, &mut Streams::given(stdin, stdout))?;
     Ok(())
 }
 
@@ -365,7 +340,11 @@ fn link_files_in_dir(
             match settings.overwrite {
                 OverwriteMode::NoClobber => {}
                 OverwriteMode::Interactive => {
-                    if streams.replace(target_dir) {
+                    if prompt_yes_on!(
+                        streams,
+                        "{}",
+                        translate!("ln-prompt-replace", "file" => target_dir.quote())
+                    ) {
                         remove_target();
                     }
                 }
@@ -441,7 +420,7 @@ fn is_same_entry(src: &Path, dst: &Path) -> bool {
 ///
 /// This is made public to allow other apps to use `ln` as a library.
 pub fn link(src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
-    link_with(src, dst, settings, &mut Streams::Process)
+    link_with(src, dst, settings, &mut Streams::process())
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -474,7 +453,11 @@ fn link_with(src: &Path, dst: &Path, settings: &Settings, streams: &mut Streams)
         match settings.overwrite {
             OverwriteMode::NoClobber => {}
             OverwriteMode::Interactive => {
-                if !streams.replace(dst) {
+                if !prompt_yes_on!(
+                    streams,
+                    "{}",
+                    translate!("ln-prompt-replace", "file" => dst.quote())
+                ) {
                     return Err(LnError::SomeLinksFailed);
                 }
 
@@ -564,11 +547,7 @@ fn link_with(src: &Path, dst: &Path, settings: &Settings, streams: &mut Streams)
     }
 
     if settings.verbose {
-        let mut process = stdout();
-        let out: &mut dyn Write = match streams {
-            Streams::Process => &mut process,
-            Streams::Given(_, stdout) => *stdout,
-        };
+        let out = streams.stdout();
         // Like GNU, `->` marks a symbolic link and `=>` a hard link.
         let arrow = if settings.symbolic { "->" } else { "=>" };
         write!(out, "{} {arrow} {}", dst.quote(), source.quote())?;
