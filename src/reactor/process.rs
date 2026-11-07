@@ -92,6 +92,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "pwd" => pwd,
             "readlink" => readlink,
             "realpath" => realpath,
+            "rm" => rm,
             "rmdir" => rmdir,
             "seq" => seq,
             "shuf" => shuf,
@@ -606,6 +607,34 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(std::fs::read(&dst).unwrap(), b"new");
         assert!(!std::path::Path::new(&src).exists());
+    }
+
+    #[cfg(feature = "rm")]
+    #[test]
+    fn rm_reports_each_removal_on_stdout() {
+        let dir = Scratch::new("rm-verbose");
+        let file = dir.path("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["rm", "-v", &file], b"");
+        let expected = format!("removed '{file}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert!(!std::path::Path::new(&file).exists());
+    }
+
+    #[cfg(feature = "rm")]
+    #[test]
+    fn rm_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("rm-interactive");
+        let file = dir.path("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (code, _, _) = exec(&["rm", "-i", &file], b"y\n");
+        assert_eq!(code, 0);
+        assert!(!std::path::Path::new(&file).exists());
     }
 
     #[cfg(feature = "pwd")]

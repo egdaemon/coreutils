@@ -56,7 +56,7 @@ which write their output as each chunk of stdin arrives.
 | pwd       | yes          |        |
 | readlink  | yes          |        |
 | realpath  | yes          |        |
-| rm        | no           | interactive prompts read stdin |
+| rm        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | rmdir     | yes          |        |
 | seq       | yes          |        |
 | sha1sum   | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |

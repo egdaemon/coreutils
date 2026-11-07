@@ -12,7 +12,7 @@ use clap::{Arg, ArgAction, Command, parser::ValueSource};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Metadata};
-use std::io::{self, IsTerminal, Write, stdin};
+use std::io::{self, Read, Write};
 use std::ops::BitOr;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -58,7 +58,7 @@ impl UError for RmError {}
 /// (e.g. a full device or a closed pipe) into an error instead of
 /// panicking like `println!` would.
 fn write_verbose_line(message: &str) -> UResult<()> {
-    writeln!(io::stdout().lock(), "{message}").map_err(|err| {
+    writeln!(uucore::io::stdout(), "{message}").map_err(|err| {
         USimpleError::new(
             1,
             translate!("rm-error-standard-output", "error" => strip_errno(&err)),
@@ -236,6 +236,20 @@ static ARG_FILES: &str = "files";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    rm_args(args)
+}
+
+/// Runs rm like [`uumain`], isolated from the process's standard streams. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    uucore::io::isolate(stdin, stdout, || rm_args(args))?
+}
+
+fn rm_args(args: impl uucore::Args) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     let matches = uu_app()
         .try_get_matches_from(args.iter())
@@ -956,7 +970,7 @@ fn prompt_file(path: &Path, options: &Options) -> bool {
 }
 
 fn prompt_file_permission_readonly(path: &Path, options: &Options, metadata: &Metadata) -> bool {
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || uucore::io::stdin_is_terminal();
     match (stdin_ok, options.interactive) {
         (false, InteractiveMode::PromptProtected) => true,
         _ if is_writable_metadata(metadata) => true,
@@ -1039,7 +1053,7 @@ mod path_tests {
 // Most cases are covered by keep eye out for edge cases
 #[cfg(unix)]
 fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata) -> bool {
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || uucore::io::stdin_is_terminal();
     match (
         stdin_ok,
         is_readable_metadata(metadata),
@@ -1067,7 +1081,7 @@ fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata
 #[cfg(windows)]
 fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata) -> bool {
     let not_user_writable = metadata.permissions().readonly();
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || uucore::io::stdin_is_terminal();
     match (stdin_ok, not_user_writable, options.interactive) {
         (false, _, InteractiveMode::PromptProtected) => true,
         (_, true, _) => prompt_yes!("remove write-protected directory {}?", path.quote()),
