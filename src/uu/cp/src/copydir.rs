@@ -24,6 +24,7 @@ use uucore::error::set_exit_code;
 use uucore::fs::{
     FileInformation, MissingHandling, ResolveMode, canonicalize, path_ends_with_terminator,
 };
+use uucore::io::Streams;
 use uucore::show;
 use uucore::translate;
 use walkdir::{DirEntry, WalkDir};
@@ -247,6 +248,7 @@ fn copy_direntry(
     entry_is_symlink: bool,
     entry_is_dir_no_follow: bool,
     options: &Options,
+    streams: &mut Streams,
     symlinked_files: &mut HashSet<FileInformation>,
     preserve_hard_links: bool,
     copied_destinations: &HashSet<PathBuf>,
@@ -279,7 +281,7 @@ fn copy_direntry(
         if !dest.exists() {
             build_dir(dest, false, options, Some(&entry.source_absolute))?;
             if options.verbose {
-                print_verbose_output(false, progress_bar, &entry.source_relative, dest)?;
+                print_verbose_output(false, progress_bar, &entry.source_relative, dest, streams)?;
             }
             return Ok(true);
         }
@@ -292,6 +294,7 @@ fn copy_direntry(
             &entry.source_relative,
             entry.local_to_target.as_path(),
             options,
+            streams,
             symlinked_files,
             copied_destinations,
             copied_files,
@@ -346,6 +349,7 @@ pub(crate) fn copy_directory(
     root: &Path,
     target: &Path,
     options: &Options,
+    streams: &mut Streams,
     symlinked_files: &mut HashSet<FileInformation>,
     copied_destinations: &HashSet<PathBuf>,
     copied_files: &mut HashMap<FileInformation, PathBuf>,
@@ -359,6 +363,7 @@ pub(crate) fn copy_directory(
             root,
             target,
             options,
+            streams,
             symlinked_files,
             copied_destinations,
             copied_files,
@@ -424,7 +429,8 @@ pub(crate) fn copy_directory(
                         //     a/b -> d/a/b
                         //
                         for (x, y) in aligned_ancestors(root, parents_dest) {
-                            uucore::outln!("{} -> {}", x.display(), y.display());
+                            writeln!(streams.stdout(), "{} -> {}", x.display(), y.display())
+                                .expect("failed printing to stdout");
                         }
                     }
                     target.join(parent)
@@ -477,6 +483,7 @@ pub(crate) fn copy_directory(
                         entry_is_symlink,
                         entry_is_dir_no_follow,
                         options,
+                        streams,
                         symlinked_files,
                         preserve_hard_links,
                         copied_destinations,
