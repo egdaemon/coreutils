@@ -15,7 +15,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, strip_errno};
-use uucore::prompt_yes;
+use uucore::io::Streams;
+use uucore::prompt_yes_on;
 use uucore::safe_traversal::{DirFd, FileStat, SymlinkBehavior};
 use uucore::show_error;
 use uucore::translate;
@@ -37,7 +38,12 @@ fn mode_writable(mode: libc::mode_t) -> bool {
 }
 
 /// File prompt that reuses existing stat data to avoid extra statx calls
-fn prompt_file_with_stat(path: &Path, stat: &FileStat, options: &Options) -> bool {
+fn prompt_file_with_stat(
+    path: &Path,
+    stat: &FileStat,
+    options: &Options,
+    streams: &mut Streams,
+) -> bool {
     if options.interactive == InteractiveMode::Never {
         return true;
     }
@@ -45,20 +51,20 @@ fn prompt_file_with_stat(path: &Path, stat: &FileStat, options: &Options) -> boo
     let is_symlink = ((stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFLNK;
     let writable = mode_writable(stat.st_mode as libc::mode_t);
     let len = stat.st_size as u64;
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || uucore::io::stdin_is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || streams.stdin_is_terminal();
 
     // Match original behaviour:
     // - Interactive::Always: always prompt; use non-protected wording when writable,
     //   otherwise fall through to protected wording.
     if options.interactive == InteractiveMode::Always {
         if is_symlink {
-            return prompt_yes!("remove symbolic link {}?", path.quote());
+            return prompt_yes_on!(streams, "remove symbolic link {}?", path.quote());
         }
         if writable {
             return if len == 0 {
-                prompt_yes!("remove regular empty file {}?", path.quote())
+                prompt_yes_on!(streams, "remove regular empty file {}?", path.quote())
             } else {
-                prompt_yes!("remove file {}?", path.quote())
+                prompt_yes_on!(streams, "remove file {}?", path.quote())
             };
         }
         // Not writable: use protected wording below
@@ -68,39 +74,57 @@ fn prompt_file_with_stat(path: &Path, stat: &FileStat, options: &Options) -> boo
     match (stdin_ok, writable, len == 0) {
         (false, _, _) if options.interactive == InteractiveMode::PromptProtected => true,
         (_, true, _) => true,
-        (_, false, true) => prompt_yes!(
+        (_, false, true) => prompt_yes_on!(
+            streams,
             "remove write-protected regular empty file {}?",
             path.quote()
         ),
-        _ => prompt_yes!("remove write-protected regular file {}?", path.quote()),
+        _ => prompt_yes_on!(
+            streams,
+            "remove write-protected regular file {}?",
+            path.quote()
+        ),
     }
 }
 
 /// Directory prompt that reuses existing stat data to avoid extra statx calls
-fn prompt_dir_with_mode(path: &Path, mode: libc::mode_t, options: &Options) -> bool {
+fn prompt_dir_with_mode(
+    path: &Path,
+    mode: libc::mode_t,
+    options: &Options,
+    streams: &mut Streams,
+) -> bool {
     if options.interactive == InteractiveMode::Never {
         return true;
     }
 
     let readable = mode_readable(mode as libc::mode_t);
     let writable = mode_writable(mode as libc::mode_t);
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || uucore::io::stdin_is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || streams.stdin_is_terminal();
 
     match (stdin_ok, readable, writable, options.interactive) {
         (false, _, _, InteractiveMode::PromptProtected)
         | (false, false, false, InteractiveMode::Never) => true,
-        (_, false, false, _) => prompt_yes!(
+        (_, false, false, _) => prompt_yes_on!(
+            streams,
             "attempt removal of inaccessible directory {}?",
             path.quote()
         ),
         (_, false, true, InteractiveMode::Always) => {
-            prompt_yes!(
+            prompt_yes_on!(
+                streams,
                 "attempt removal of inaccessible directory {}?",
                 path.quote()
             )
         }
-        (_, true, false, _) => prompt_yes!("remove write-protected directory {}?", path.quote()),
-        (_, _, _, InteractiveMode::Always) => prompt_yes!("remove directory {}?", path.quote()),
+        (_, true, false, _) => prompt_yes_on!(
+            streams,
+            "remove write-protected directory {}?",
+            path.quote()
+        ),
+        (_, _, _, InteractiveMode::Always) => {
+            prompt_yes_on!(streams, "remove directory {}?", path.quote())
+        }
         (_, _, _, _) => true,
     }
 }
@@ -114,6 +138,7 @@ pub fn is_readable(path: &Path) -> bool {
 pub fn safe_remove_file(
     path: &Path,
     options: &Options,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
 ) -> Option<bool> {
     // If there is no parent (path is directly under cwd), unlinkat relative to "."
@@ -128,7 +153,7 @@ pub fn safe_remove_file(
             if let Some(pb) = progress_bar {
                 pb.inc(1);
             }
-            report_verbose_write_error(verbose_removed_file(path, options));
+            report_verbose_write_error(verbose_removed_file(path, options, streams));
             Some(false)
         }
         Err(e) => {
@@ -146,6 +171,7 @@ pub fn safe_remove_file(
 pub fn safe_remove_empty_dir(
     path: &Path,
     options: &Options,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
 ) -> Option<bool> {
     let parent = path.parent().unwrap_or(Path::new("."));
@@ -159,7 +185,7 @@ pub fn safe_remove_empty_dir(
             if let Some(pb) = progress_bar {
                 pb.inc(1);
             }
-            report_verbose_write_error(verbose_removed_directory(path, options));
+            report_verbose_write_error(verbose_removed_directory(path, options, streams));
             Some(false)
         }
         Err(e) => {
@@ -193,6 +219,7 @@ fn handle_permission_denied(
     entry_name: &OsStr,
     entry_path: &Path,
     options: &Options,
+    streams: &mut Streams,
 ) -> bool {
     // When we can't open a subdirectory due to permission denied,
     // try to remove it directly (it might be empty).
@@ -206,7 +233,7 @@ fn handle_permission_denied(
         return true;
     }
     // Successfully removed empty directory
-    report_verbose_write_error(verbose_removed_directory(entry_path, options));
+    report_verbose_write_error(verbose_removed_directory(entry_path, options, streams));
     false
 }
 
@@ -217,6 +244,7 @@ fn handle_unlink(
     entry_path: &Path,
     is_dir: bool,
     options: &Options,
+    streams: &mut Streams,
 ) -> bool {
     if let Err(e) = dir_fd.unlink_at(entry_name, is_dir) {
         let e = e
@@ -225,16 +253,21 @@ fn handle_unlink(
         true
     } else {
         report_verbose_write_error(if is_dir {
-            verbose_removed_directory(entry_path, options)
+            verbose_removed_directory(entry_path, options, streams)
         } else {
-            verbose_removed_file(entry_path, options)
+            verbose_removed_file(entry_path, options, streams)
         });
         false
     }
 }
 
 /// Helper function to remove directory handling special cases
-pub fn remove_dir_with_special_cases(path: &Path, options: &Options, error_occurred: bool) -> bool {
+pub fn remove_dir_with_special_cases(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    error_occurred: bool,
+) -> bool {
     match fs::remove_dir(path) {
         Err(_) if !error_occurred && !is_readable(path) => {
             // For compatibility with GNU test case
@@ -258,7 +291,7 @@ pub fn remove_dir_with_special_cases(path: &Path, options: &Options, error_occur
             error_occurred
         }
         Ok(_) => {
-            report_verbose_write_error(verbose_removed_directory(path, options));
+            report_verbose_write_error(verbose_removed_directory(path, options, streams));
             false
         }
     }
@@ -289,13 +322,14 @@ fn show_preserve_root_all_skip(path: &Path) {
 pub fn safe_remove_dir_recursive(
     path: &Path,
     options: &Options,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
 ) -> bool {
     // Base case 1: this is a file or a symbolic link.
     // Use lstat to avoid race condition between check and use
     let (initial_mode, root_dev, root_ino) = match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_dir() => {
-            return remove_file(path, options, progress_bar);
+            return remove_file(path, options, streams, progress_bar);
         }
         // root_dev is the tree-root device, captured once and compared against
         // every subdirectory for --one-file-system (not recomputed per level).
@@ -331,7 +365,7 @@ pub fn safe_remove_dir_recursive(
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 // Try to remove the directory directly if it's empty
                 if fs::remove_dir(path).is_ok() {
-                    report_verbose_write_error(verbose_removed_directory(path, options));
+                    report_verbose_write_error(verbose_removed_directory(path, options, streams));
                     return false;
                 }
                 // If we can't read the directory AND can't remove it,
@@ -362,7 +396,7 @@ pub fn safe_remove_dir_recursive(
         }
     }
 
-    let error = safe_remove_dir_recursive_impl(path, dir_fd, options, root_dev, root_ino);
+    let error = safe_remove_dir_recursive_impl(path, dir_fd, options, streams, root_dev, root_ino);
 
     // After processing all children, remove the directory itself
     if error {
@@ -370,7 +404,7 @@ pub fn safe_remove_dir_recursive(
     } else {
         // Ask user permission if needed
         if options.interactive == InteractiveMode::Always
-            && !prompt_dir_with_mode(path, initial_mode as libc::mode_t, options)
+            && !prompt_dir_with_mode(path, initial_mode as libc::mode_t, options, streams)
         {
             return false;
         }
@@ -386,14 +420,14 @@ pub fn safe_remove_dir_recursive(
             }
             // Try to remove the directory anyway and let the system tell us why it failed
             // Use false for error_occurred since this is the main error we want to report
-            return remove_dir_with_special_cases(path, options, false);
+            return remove_dir_with_special_cases(path, options, streams, false);
         }
 
         // Directory is empty and user approved removal
-        if let Some(result) = safe_remove_empty_dir(path, options, progress_bar) {
+        if let Some(result) = safe_remove_empty_dir(path, options, streams, progress_bar) {
             result
         } else {
-            remove_dir_with_special_cases(path, options, error)
+            remove_dir_with_special_cases(path, options, streams, error)
         }
     }
 }
@@ -467,6 +501,7 @@ pub fn safe_remove_dir_recursive_impl(
     path: &Path,
     mut cur_fd: DirFd,
     options: &Options,
+    streams: &mut Streams,
     root_dev: u64,
     root_ino: u64,
 ) -> bool {
@@ -520,7 +555,12 @@ pub fn safe_remove_dir_recursive_impl(
             // the now-empty subdirectory using safe unlinkat.
             if !child_error
                 && (options.interactive != InteractiveMode::Always
-                    || prompt_dir_with_mode(path_of(&path_buf), parent.entry_mode, options))
+                    || prompt_dir_with_mode(
+                        path_of(&path_buf),
+                        parent.entry_mode,
+                        options,
+                        streams,
+                    ))
             {
                 error |= handle_unlink(
                     &cur_fd,
@@ -528,6 +568,7 @@ pub fn safe_remove_dir_recursive_impl(
                     path_of(&path_buf),
                     true,
                     options,
+                    streams,
                 );
             }
             path_buf.truncate(parent.path_len);
@@ -552,9 +593,15 @@ pub fn safe_remove_dir_recursive_impl(
             let is_dir = ((entry_stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFDIR;
             if !is_dir {
                 // Remove file - check if user wants to remove it first
-                if prompt_file_with_stat(path_of(&path_buf), &entry_stat, options) {
-                    error |=
-                        handle_unlink(&cur_fd, &entry_name, path_of(&path_buf), false, options);
+                if prompt_file_with_stat(path_of(&path_buf), &entry_stat, options, streams) {
+                    error |= handle_unlink(
+                        &cur_fd,
+                        &entry_name,
+                        path_of(&path_buf),
+                        false,
+                        options,
+                        streams,
+                    );
                 }
                 break 'entry false;
             }
@@ -586,7 +633,7 @@ pub fn safe_remove_dir_recursive_impl(
             // Ask user if they want to descend into this directory
             if options.interactive == InteractiveMode::Always
                 && !is_subdir_empty(&cur_fd, &entry_name)
-                && !prompt_descend(path_of(&path_buf))
+                && !prompt_descend(path_of(&path_buf), streams)
             {
                 break 'entry false;
             }
@@ -607,6 +654,7 @@ pub fn safe_remove_dir_recursive_impl(
                             &entry_name,
                             path_of(&path_buf),
                             options,
+                            streams,
                         );
                     } else {
                         error |= handle_error_with_force(e, path_of(&path_buf), options);
@@ -658,6 +706,7 @@ pub fn safe_remove_dir_recursive_impl(
     _path: &Path,
     _dir_fd: DirFd,
     _options: &Options,
+    streams: &mut Streams,
     _root_dev: u64,
     _root_ino: u64,
 ) -> bool {
