@@ -12,9 +12,9 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use uucore::error::UError;
+use uucore::error::{UError, UResult};
 
 pub trait Process {
     /// Whether the utility reads stdin, the reactor only reads it for those that do.
@@ -40,6 +40,14 @@ pub fn lookup(util: &str) -> Option<Spawn> {
         "echo" => Some(spawn_echo),
         #[cfg(feature = "tee")]
         "tee" => Some(spawn_tee),
+        #[cfg(feature = "pwd")]
+        "pwd" => Some(|argv, _| {
+            Ok(Batch::new(argv, false, |args, _, stdout| {
+                ::pwd::uumain_with(args, stdout)
+            }))
+        }),
+        #[cfg(feature = "tr")]
+        "tr" => Some(|argv, _| Ok(Batch::new(argv, true, ::tr::uumain_with))),
         _ => None,
     }
 }
@@ -58,6 +66,56 @@ fn report(err: &dyn UError, stderr: &mut Vec<u8>) -> i32 {
         );
     }
     err.code()
+}
+
+/// Runs a utility in one step once its stdin is exhausted, for utilities that read all of their input
+/// before they are done. Its stdin is held in memory until then.
+#[allow(dead_code)] // unused when no batch utility is enabled
+struct Batch {
+    argv: Vec<OsString>,
+    // None for utilities without stdin.
+    input: Option<Vec<u8>>,
+    run: Run,
+}
+
+type Run = fn(std::vec::IntoIter<OsString>, &mut dyn BufRead, &mut dyn Write) -> UResult<()>;
+
+#[allow(dead_code)] // unused when no batch utility is enabled
+impl Batch {
+    fn new(argv: Vec<OsString>, stdin: bool, run: Run) -> Box<dyn Process> {
+        Box::new(Self {
+            argv,
+            input: stdin.then(Vec::new),
+            run,
+        })
+    }
+}
+
+impl Process for Batch {
+    fn stdin(&self) -> bool {
+        self.input.is_some()
+    }
+
+    fn step(
+        &mut self,
+        input: Option<&[u8]>,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> Option<i32> {
+        if let (Some(buf), Some(chunk)) = (self.input.as_mut(), input) {
+            buf.extend_from_slice(chunk);
+            return None;
+        }
+
+        let argv = std::mem::take(&mut self.argv);
+        let input = self.input.take().unwrap_or_default();
+        Some(
+            match (self.run)(argv.into_iter(), &mut input.as_slice(), stdout) {
+                Ok(()) => uucore::error::get_exit_code(),
+                Err(err) => report(err.as_ref(), stderr),
+            },
+        )
+    }
 }
 
 #[cfg(feature = "echo")]
@@ -242,6 +300,40 @@ mod tests {
         assert_eq!(stdout, b"abc");
         assert_eq!(std::fs::read(&file).unwrap(), b"abc");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "tr")]
+    #[test]
+    fn tr_translates_its_input_once_exhausted() {
+        let mut p = lookup("tr").unwrap()(argv(&["tr", "a-z", "A-Z"]), &mut Vec::new()).unwrap();
+        assert!(p.stdin());
+        assert_eq!(
+            run(p.as_mut(), &[b"hel", b"lo\n"]),
+            (0, b"HELLO\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "tr")]
+    #[test]
+    fn tr_reports_a_missing_operand() {
+        let mut p = lookup("tr").unwrap()(argv(&["tr"]), &mut Vec::new()).unwrap();
+        let (code, stdout, stderr) = run(p.as_mut(), &[]);
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "pwd")]
+    #[test]
+    fn pwd_writes_the_working_directory() {
+        let mut p = lookup("pwd").unwrap()(argv(&["pwd", "-P"]), &mut Vec::new()).unwrap();
+        assert!(!p.stdin());
+        let mut expected = env::current_dir()
+            .unwrap()
+            .into_os_string()
+            .into_encoded_bytes();
+        expected.push(b'\n');
+        assert_eq!(run(p.as_mut(), &[]), (0, expected, Vec::new()));
     }
 
     #[cfg(feature = "tee")]

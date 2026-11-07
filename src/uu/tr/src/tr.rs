@@ -15,9 +15,7 @@ use operation::{
 };
 use simd::process_input;
 use std::ffi::OsString;
-#[cfg(not(any(unix, target_os = "wasi")))]
-use std::io::Write;
-use std::io::{stdin, stdout};
+use std::io::{BufRead, Write, stdin, stdout};
 use uucore::display::Quotable;
 use uucore::error::{UResult, USimpleError, UUsageError};
 use uucore::fs::is_stdin_directory;
@@ -36,6 +34,42 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let args: Vec<OsString> = args.collect();
+    let stdin = stdin();
+    // Write straight to the file descriptor: `Stdout` is line buffered, which
+    // costs a search for the last newline and an extra write per chunk.
+    // Every chunk is written as soon as it is translated, so `-u` has nothing
+    // left to do here.
+    #[cfg(any(unix, target_os = "wasi"))]
+    let mut output = uucore::io::RawWriter(stdout());
+    #[cfg(not(any(unix, target_os = "wasi")))]
+    let mut output = FlushEachChunk {
+        inner: stdout().lock(),
+        enabled: uu_app()
+            .try_get_matches_from(&args)
+            .is_ok_and(|m| m.get_flag(options::UNBUFFERED)),
+    };
+    tr(args.into_iter(), &mut stdin.lock(), &mut output, || {
+        is_stdin_directory(&stdin)
+    })
+}
+
+/// Runs tr like [`uumain`], reading `stdin` and writing to `stdout` instead of the process's
+/// standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    tr(args, &mut &mut *stdin, &mut &mut *stdout, || false)
+}
+
+fn tr<R: BufRead, W: Write>(
+    args: impl uucore::Args,
+    input: &mut R,
+    output: &mut W,
+    stdin_is_directory: impl FnOnce() -> bool,
+) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in set diagnostics, which needs the sets as typed.
     let set_args = uucore::diagnostics::capture(&args);
@@ -99,20 +133,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     }
 
-    let stdin = stdin();
-    let mut locked_stdin = stdin.lock();
-    // Write straight to the file descriptor: `Stdout` is line buffered, which
-    // costs a search for the last newline and an extra write per chunk.
-    // Every chunk is written as soon as it is translated, so `-u` has nothing
-    // left to do here.
-    #[cfg(any(unix, target_os = "wasi"))]
-    let mut output = uucore::io::RawWriter(stdout());
-    #[cfg(not(any(unix, target_os = "wasi")))]
-    let mut output = FlushEachChunk {
-        inner: stdout().lock(),
-        enabled: matches.get_flag(options::UNBUFFERED),
-    };
-
     // According to the man page: translating only happens if deleting or if a second set is given
     let translating = !delete_flag && sets.len() > 1;
     let mut sets_iter = sets.iter().map(OsString::as_os_str);
@@ -135,7 +155,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     };
 
-    if is_stdin_directory(&stdin) {
+    if stdin_is_directory() {
         return Err(USimpleError::new(1, translate!("tr-error-read-directory")));
     }
 
@@ -145,27 +165,27 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             let delete_op = DeleteOperation::new(set1);
             let squeeze_op = SqueezeOperation::new(set2);
             let op = delete_op.chain(squeeze_op);
-            translate_input(&mut locked_stdin, &mut output, op)?;
+            translate_input(input, output, op)?;
         } else {
             let op = DeleteOperation::new(set1);
-            process_input(&mut locked_stdin, &mut output, &op)?;
+            process_input(input, output, &op)?;
         }
     } else if squeeze_flag {
         if sets_len == 1 {
             let op = SqueezeOperation::new(set1);
-            translate_input(&mut locked_stdin, &mut output, op)?;
+            translate_input(input, output, op)?;
         } else {
             let translate_op = TranslateOperation::new(set1, set2.clone())?;
             let squeeze_op = SqueezeOperation::new(set2);
             let op = translate_op.chain(squeeze_op);
-            translate_input(&mut locked_stdin, &mut output, op)?;
+            translate_input(input, output, op)?;
         }
     } else {
         let op = TranslateOperation::new(set1, set2)?;
-        process_input(&mut locked_stdin, &mut output, &op)?;
+        process_input(input, output, &op)?;
     }
 
-    flush_output(&mut output)?;
+    flush_output(output)?;
 
     Ok(())
 }

@@ -6,7 +6,7 @@
 use clap::ArgAction;
 use clap::{Arg, Command};
 use std::env;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use uucore::format_usage;
 
@@ -112,6 +112,18 @@ fn logical_path() -> io::Result<PathBuf> {
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    pwd(args, println_verbatim)
+}
+
+/// Runs pwd like [`uumain`], writing to `stdout` instead of the process's standard output.
+pub fn uumain_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
+    pwd(args, |cwd| {
+        stdout.write_all(cwd.as_os_str().as_encoded_bytes())?;
+        stdout.write_all(b"\n")
+    })
+}
+
+fn pwd(args: impl uucore::Args, print: impl FnOnce(PathBuf) -> io::Result<()>) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     // GNU pwd ignores any non-option operands but warns about them.
@@ -149,8 +161,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .map(Into::into)
         .unwrap_or(cwd);
 
-    println_verbatim(cwd)
-        .map_err_context(|| translate!("pwd-error-failed-to-print-current-directory"))?;
+    print(cwd).map_err_context(|| translate!("pwd-error-failed-to-print-current-directory"))?;
     Ok(())
 }
 
