@@ -84,6 +84,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "nl" => nl,
             "nproc" => nproc,
             "numfmt" => numfmt,
+            "od" => od,
             "paste" => paste,
             "pr" => pr,
             "printenv" => printenv,
@@ -568,6 +569,34 @@ mod tests {
             exec(&["numfmt", "--from=si", "1K", "2M"], b""),
             (0, b"1000\n2000000\n".to_vec(), Vec::new())
         );
+    }
+
+    #[cfg(feature = "od")]
+    #[test]
+    fn od_dumps_stdin() {
+        assert_eq!(
+            exec(&["od", "-An", "-tx1"], b"AB"),
+            (0, b" 41 42\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "od")]
+    #[test]
+    fn od_skips_into_stdin_after_a_file() {
+        let dir = env::temp_dir().join(format!("reactor-od-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"ab").unwrap();
+
+        let (code, stdout, stderr) = exec(
+            &["od", "-An", "-c", "-j", "3", file.to_str().unwrap(), "-"],
+            b"xyz",
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"   y   z\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "pwd")]
