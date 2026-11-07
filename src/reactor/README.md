@@ -41,7 +41,7 @@ which write their output as each chunk of stdin arrives.
 | md5sum    | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
-| mv        | no           | interactive prompts read stdin |
+| mv        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | nice      | no           | runs another program |
 | nl        | yes          |        |
 | nproc     | yes          |        |

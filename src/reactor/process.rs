@@ -81,6 +81,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "link" => link,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
+            "mv" => mv,
             "nl" => nl,
             "nproc" => nproc,
             "paste" => paste,
@@ -575,6 +576,36 @@ mod tests {
         let (code, _, _) = exec(&["cp", "-i", &src, &dst], b"y\n");
         assert_eq!(code, 0);
         assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+    }
+
+    #[cfg(feature = "mv")]
+    #[test]
+    fn mv_reports_each_rename_on_stdout() {
+        let dir = Scratch::new("mv-verbose");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["mv", "-v", &src, &dst], b"");
+        let expected = format!("renamed '{src}' -> '{dst}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"x");
+    }
+
+    #[cfg(feature = "mv")]
+    #[test]
+    fn mv_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("mv-interactive");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        let (code, _, _) = exec(&["mv", "-i", &src, &dst], b"y\n");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+        assert!(!std::path::Path::new(&src).exists());
     }
 
     #[cfg(feature = "pwd")]
