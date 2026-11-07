@@ -84,6 +84,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "nl" => nl,
             "nproc" => nproc,
             "paste" => paste,
+            "pathchk" => pathchk,
             "pr" => pr,
             "printenv" => printenv,
             "printf" => printf,
@@ -572,6 +573,15 @@ mod tests {
             (1, b"not a tty\n".to_vec(), Vec::new())
         );
         assert_eq!(exec(&["tty", "-s"], b""), (1, Vec::new(), Vec::new()));
+    }
+
+    #[cfg(feature = "pathchk")]
+    #[test]
+    fn pathchk_accepts_a_portable_path() {
+        assert_eq!(
+            exec(&["pathchk", "-p", "a/b.c"], b""),
+            (0, Vec::new(), Vec::new())
+        );
     }
 
     #[cfg(feature = "pwd")]

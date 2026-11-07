@@ -48,7 +48,7 @@ which write their output as each chunk of stdin arrives.
 | numfmt    | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | od        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | paste     | yes          |        |
-| pathchk   | no           | not ported yet |
+| pathchk   | yes          |        |
 | pr        | yes          |        |
 | printenv  | yes          |        |
 | printf    | yes          |        |
