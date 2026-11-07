@@ -83,6 +83,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "mktemp" => mktemp,
             "nl" => nl,
             "nproc" => nproc,
+            "numfmt" => numfmt,
             "paste" => paste,
             "pr" => pr,
             "printenv" => printenv,
@@ -549,6 +550,24 @@ mod tests {
             (0, b"ab\nxy\n".to_vec(), Vec::new())
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "numfmt")]
+    #[test]
+    fn numfmt_converts_the_lines_of_stdin() {
+        assert_eq!(
+            exec(&["numfmt", "--to=iec"], b"1024\n2048\n"),
+            (0, b"1.0K\n2.0K\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "numfmt")]
+    #[test]
+    fn numfmt_converts_its_arguments() {
+        assert_eq!(
+            exec(&["numfmt", "--from=si", "1K", "2M"], b""),
+            (0, b"1000\n2000000\n".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "pwd")]

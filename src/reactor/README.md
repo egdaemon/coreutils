@@ -45,7 +45,7 @@ which write their output as each chunk of stdin arrives.
 | nice      | no           | runs another program |
 | nl        | yes          |        |
 | nproc     | yes          |        |
-| numfmt    | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| numfmt    | yes          |        |
 | od        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | paste     | yes          |        |
 | pathchk   | no           | not ported yet |
