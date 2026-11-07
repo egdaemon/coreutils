@@ -79,6 +79,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "hostid" => hostid,
             "join" => join,
             "link" => link,
+            "ln" => ln,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
             "nl" => nl,
@@ -625,6 +626,37 @@ mod tests {
         assert!(String::from_utf8(stderr).unwrap().contains("'-'"));
         assert!(before.is_file());
         assert!(!after.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "ln")]
+    #[test]
+    fn ln_reports_the_links_it_makes() {
+        let dir = scratch("ln");
+        let link = dir.join("link");
+
+        let (code, stdout, stderr) = exec(&["ln", "-sv", "target", link.to_str().unwrap()], b"");
+        let expected = format!("'{}' -> 'target'\n", link.display());
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("target"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "ln")]
+    #[test]
+    fn ln_asks_stdin_before_replacing() {
+        let dir = scratch("ln-interactive");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("old", &link).unwrap();
+        let ln = |answer: &[u8]| exec(&["ln", "-sfi", "new", link.to_str().unwrap()], answer).0;
+
+        assert_eq!(ln(b"n\n"), 1);
+        assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("old"));
+        assert_eq!(ln(b"y\n"), 0);
+        assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("new"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

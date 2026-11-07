@@ -36,7 +36,7 @@ which write their output as each chunk of stdin arrives.
 | hostid    | yes          |        |
 | join      | yes          |        |
 | link      | yes          |        |
-| ln        | no           | not ported yet |
+| ln        | yes          | `-i` reads its answers from stdin |
 | ls        | no           | layout and colour depend on the terminal |
 | md5sum    | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | mkdir     | yes          |        |

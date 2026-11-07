@@ -493,8 +493,13 @@ pub fn args_os_filtered() -> impl Iterator<Item = OsString> {
 
 /// Read a line from stdin and check whether the first character is `'y'` or `'Y'`
 pub fn read_yes() -> bool {
+    read_yes_from(&mut std::io::stdin().lock())
+}
+
+/// Like [`read_yes`], reading the line from `input` instead of stdin.
+pub fn read_yes_from(input: &mut dyn BufRead) -> bool {
     let mut s = String::new();
-    std::io::stdin().read_line(&mut s).is_ok() && matches!(s.chars().next(), Some('y' | 'Y'))
+    input.read_line(&mut s).is_ok() && matches!(s.chars().next(), Some('y' | 'Y'))
 }
 
 #[derive(Debug, thiserror::Error)]
