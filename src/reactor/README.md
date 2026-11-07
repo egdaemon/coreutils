@@ -29,7 +29,7 @@ which write their output as each chunk of stdin arrives.
 | expand    | yes          |        |
 | expr      | yes          |        |
 | factor    | yes          |        |
-| false     | no           | shell builtin |
+| false     | yes          |        |
 | fmt       | yes          |        |
 | fold      | yes          |        |
 | head      | yes          |        |
@@ -76,7 +76,7 @@ which write their output as each chunk of stdin arrives.
 | test      | no           | shell builtin; `-t` needs `isatty` |
 | touch     | no           | not ported yet |
 | tr        | yes          |        |
-| true      | no           | shell builtin |
+| true      | yes          |        |
 | truncate  | yes          |        |
 | tsort     | yes          |        |
 | tty       | no           | needs a terminal |

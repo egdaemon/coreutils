@@ -72,6 +72,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "expand" => expand,
             "expr" => expr,
             "factor" => factor,
+            "false" => r#false,
             "fmt" => fmt,
             "fold" => fold,
             "head" => head,
@@ -99,6 +100,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "tail" => tail,
             "tr" => tr,
             "truncate" => truncate,
+            "true" => r#true,
             "tsort" => tsort,
             "uname" => uname,
             "unexpand" => unexpand,
@@ -522,6 +524,26 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "true")]
+    #[test]
+    fn true_succeeds() {
+        assert_eq!(exec(&["true"], b""), (0, Vec::new(), Vec::new()));
+    }
+
+    #[cfg(feature = "true")]
+    #[test]
+    fn true_writes_its_version() {
+        let (code, stdout, stderr) = exec(&["true", "--version"], b"");
+        assert_eq!((code, stderr), (0, Vec::new()));
+        assert!(stdout.starts_with(b"true "));
+    }
+
+    #[cfg(feature = "false")]
+    #[test]
+    fn false_fails() {
+        assert_eq!(exec(&["false"], b""), (1, Vec::new(), Vec::new()));
     }
 
     #[cfg(feature = "pwd")]
