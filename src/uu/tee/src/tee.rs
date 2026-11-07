@@ -24,6 +24,11 @@ use uucore::signals::{disable_pipe_errors, ignore_interrupts};
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let options = parse(args)?;
+    tee(&options).map_err(|_| 1.into())
+}
+
+fn parse(args: impl uucore::Args) -> UResult<Options> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let append = matches.get_flag(options::APPEND);
@@ -45,15 +50,67 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .map(|v| v.cloned().collect())
         .unwrap_or_default();
 
-    let options = Options {
+    Ok(Options {
         append,
         ignore_interrupts,
         ignore_pipe_errors,
         files,
         output_error,
-    };
+    })
+}
 
-    tee(&options).map_err(|_| 1.into())
+/// Tee driven a chunk of input at a time, for callers that own the standard streams.
+pub struct Tee {
+    output: MultiWriter,
+    all_open_succeed: bool,
+    stdout: Option<OsString>,
+}
+
+impl Tee {
+    /// Parses the arguments and opens the files, like [`uumain`].
+    pub fn new(args: impl uucore::Args) -> UResult<Self> {
+        let options = parse(args)?;
+        let writers: Vec<NamedWriter> = options
+            .files
+            .iter()
+            .filter_map(|file| open(file, options.append, options.output_error.as_ref()))
+            .collect::<io::Result<Vec<NamedWriter>>>()
+            .map_err(|_| 1)?;
+        Ok(Self {
+            all_open_succeed: writers.len() == options.files.len(),
+            output: MultiWriter::new(writers, options.output_error),
+            stdout: Some(translate!("tee-standard-output").into()),
+        })
+    }
+
+    /// Writes a chunk of input to the files and to `stdout`. An error means tee aborted.
+    pub fn write(&mut self, buf: &[u8], stdout: &mut dyn Write) -> Result<(), ()> {
+        if let Some(name) = &self.stdout
+            && let Err(e) = stdout.write_all(buf)
+        {
+            let writer = NamedWriter {
+                name: name.clone(),
+                inner: Writer::Discard,
+            };
+            self.stdout = None;
+            if process_error(
+                self.output.output_error_mode,
+                e,
+                &writer,
+                &mut self.output.ignored_errors,
+            )
+            .is_err()
+            {
+                return Err(());
+            }
+        }
+        self.output.write_flush(buf)
+    }
+
+    /// The exit code once the input is exhausted.
+    pub fn finish(self) -> i32 {
+        i32::from(!(self.all_open_succeed && self.output.ignored_errors == 0))
+    }
 }
 
 fn tee(options: &Options) -> Result<(), ()> {
@@ -298,6 +355,8 @@ fn process_error(
 
 enum Writer {
     File(std::fs::File),
+    // stands in for a writer owned by the caller of Tee, when reporting its errors
+    Discard,
     // remove buffering for posix requirement and improve throughput
     #[cfg(any(unix, target_os = "wasi"))]
     Stdout(uucore::io::RawWriter<rustix::fd::BorrowedFd<'static>>),
@@ -310,6 +369,7 @@ impl Writer {
         match self {
             // File does not have line buffering
             Self::File(f) => f.write_all(buf),
+            Self::Discard => Ok(()),
             #[cfg(any(unix, target_os = "wasi"))]
             Self::Stdout(s) => s.write_all(buf),
             #[cfg(not(any(unix, target_os = "wasi")))]
@@ -332,6 +392,7 @@ impl rustix::fd::AsFd for NamedWriter {
     fn as_fd(&self) -> rustix::fd::BorrowedFd<'_> {
         match &self.inner {
             Writer::File(f) => f.as_fd(),
+            Writer::Discard => unreachable!("only Tee creates it, outside of the splice path"),
             Writer::Stdout(s) => s.0,
         }
     }

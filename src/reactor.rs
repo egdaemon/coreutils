@@ -16,10 +16,20 @@
 //! The module may be kept alive across many calls, but a call must finish before the next one
 //! starts (the module is single threaded). Per call state (argv[0], the exit code) is reset on
 //! entry. Other process wide state kept by utilities is not reset.
+//!
+//! The utilities with an entry point that can be driven a step at a time (see `process`) are also
+//! exported as processes for the guest modules of eg, through `execveatinit`/`execveatwait` (see
+//! `execveat`). Those run concurrently, with their stdio on unix sockets.
 
 use std::ffi::OsString;
 use std::io::Write;
 use uucore::locale;
+
+#[cfg(target_os = "wasi")]
+mod execveat;
+mod process;
+#[cfg(target_os = "wasi")]
+mod wasinet;
 
 /// Allocate `len` bytes of guest memory for the host to write arguments into.
 #[unsafe(export_name = "uu_alloc")]
@@ -91,9 +101,21 @@ fn run(
         argv.push(OsString::from(util));
     }
 
-    // The module is long lived and shared by every call, so nothing may carry over between them:
-    // argv[0] is per call and the exit code of a previous call must not leak into this one.
-    let argv0 = argv[0].to_string_lossy().into_owned();
+    if let Err(err) = invocation(util, &argv[0]) {
+        eprintln!("{err}");
+        return 99;
+    }
+
+    let code = uumain(argv.into_iter());
+    let _ = std::io::stdout().flush();
+    code
+}
+
+/// Prepares uucore for an invocation of `util` as `argv0`. The module is long lived and shared by
+/// every call, so nothing may carry over between them: argv[0] is per call and the exit code of a
+/// previous call must not leak into this one.
+fn invocation(util: &str, argv0: &OsString) -> Result<(), String> {
+    let argv0 = argv0.to_string_lossy().into_owned();
     let name = std::path::Path::new(&argv0)
         .file_name()
         .map_or_else(|| argv0.clone(), |n| n.to_string_lossy().into_owned());
@@ -104,14 +126,8 @@ fn run(
         "dir" | "vdir" => "ls",
         other => other,
     };
-    if let Err(err) = locale::setup_localization(canonical) {
-        eprintln!("Could not init the localization system: {err}");
-        return 99;
-    }
-
-    let code = uumain(argv.into_iter());
-    let _ = std::io::stdout().flush();
-    code
+    locale::setup_localization(canonical)
+        .map_err(|err| format!("Could not init the localization system: {err}"))
 }
 
 include!(concat!(env!("OUT_DIR"), "/uutils_reactor.rs"));
