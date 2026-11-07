@@ -19,7 +19,7 @@ which write their output as each chunk of stdin arrives.
 | comm      | yes          |        |
 | cp        | no           | interactive prompts read stdin |
 | csplit    | yes          |        |
-| cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| cut       | yes          |        |
 | date      | yes          |        |
 | dd        | no           | operates on file descriptors directly |
 | dir       | no           | layout and colour depend on the terminal |

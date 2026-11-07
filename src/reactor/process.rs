@@ -65,6 +65,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "cat" => cat,
             "comm" => comm,
             "csplit" => csplit,
+            "cut" => cut,
             "date" => date,
             "dircolors" => dircolors,
             "dirname" => dirname,
@@ -522,6 +523,32 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "cut")]
+    #[test]
+    fn cut_selects_fields_of_stdin() {
+        assert_eq!(
+            exec(&["cut", "-d", ",", "-f", "2"], b"a,b,c\nd,e,f\n"),
+            (0, b"b\ne\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "cut")]
+    #[test]
+    fn cut_selects_bytes_of_a_file_and_stdin() {
+        let dir = env::temp_dir().join(format!("reactor-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abc\n").unwrap();
+
+        let (code, stdout, stderr) =
+            exec(&["cut", "-b", "1-2", file.to_str().unwrap(), "-"], b"xyz\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"ab\nxy\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "pwd")]
