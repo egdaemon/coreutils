@@ -22,7 +22,7 @@ which write their output as each chunk of stdin arrives.
 | cut       | yes          |        |
 | date      | yes          |        |
 | dd        | no           | operates on file descriptors directly |
-| dir       | no           | layout and colour depend on the terminal |
+| dir       | yes          | columns are 80 wide unless `-w` or `COLUMNS` says otherwise, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | dircolors | yes          |        |
 | dirname   | yes          |        |
 | echo      | yes          |        |
@@ -37,7 +37,7 @@ which write their output as each chunk of stdin arrives.
 | join      | yes          |        |
 | link      | yes          |        |
 | ln        | yes          | `-i` reads its answers from stdin |
-| ls        | no           | layout and colour depend on the terminal |
+| ls        | yes          | one entry per line by default, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal; `-C` and `-x` are 80 columns wide unless `-w` or `COLUMNS` says otherwise |
 | md5sum    | yes          |        |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
@@ -84,6 +84,6 @@ which write their output as each chunk of stdin arrives.
 | unexpand  | yes          |        |
 | uniq      | yes          |        |
 | unlink    | yes          |        |
-| vdir      | no           | layout and colour depend on the terminal |
+| vdir      | yes          | `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | wc        | yes          |        |
 | yes       | no           | never exits: the reactor buffers a utility's whole output before writing it |

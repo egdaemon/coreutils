@@ -5,12 +5,27 @@
 
 use clap::Command;
 use std::ffi::OsString;
+use std::io::{Read, Write};
 use std::path::Path;
-use uu_ls::{Config, options};
+use uu_ls::{Config, ProgramMode, options};
 use uucore::{error::UResult, format_usage, translate};
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    dir(args, None)
+}
+
+/// Runs dir like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    dir(args, Some(stdout))
+}
+
+/// Lists to `stdout`, or to the process's standard output without one.
+fn dir(args: impl uucore::Args, stdout: Option<&mut dyn Write>) -> UResult<()> {
     let command = uu_app();
 
     // The arguments are kept for the caret in SIZE diagnostics, which echoes
@@ -18,13 +33,18 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let (matches, diag_args) =
         uucore::clap_localization::handle_clap_result_with_diagnostics(command, args.collect(), 2)?;
 
-    let config = Config::from_dir(&matches, diag_args.as_deref())?;
-
     let locs = matches
         .get_many::<OsString>(options::PATHS)
         .map_or_else(|| vec![Path::new(".")], |v| v.map(Path::new).collect());
 
-    uu_ls::list(locs, &config)
+    match stdout {
+        None => uu_ls::list(locs, &Config::from_dir(&matches, diag_args.as_deref())?),
+        Some(stdout) => uu_ls::list_to(
+            locs,
+            &Config::isolated(&matches, diag_args.as_deref(), ProgramMode::Dir)?,
+            stdout,
+        ),
+    }
 }
 
 // To avoid code duplication, we reuse ls uu_app function which has the same

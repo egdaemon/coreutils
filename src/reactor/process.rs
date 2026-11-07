@@ -76,6 +76,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "csplit" => csplit,
             "cut" => cut,
             "date" => date,
+            "dir" => dir,
             "dircolors" => dircolors,
             "dirname" => dirname,
             "echo" => echo,
@@ -90,6 +91,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "join" => join,
             "link" => link,
             "ln" => ln,
+            "ls" => ls,
             "md5sum" => md5sum,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
@@ -131,6 +133,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "unexpand" => unexpand,
             "uniq" => uniq,
             "unlink" => unlink,
+            "vdir" => vdir,
             "wc" => wc,
         ),
     }
@@ -278,9 +281,17 @@ fn chdir(dir: &std::path::Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Runs a utility as `execveatwait` does, after preparing uucore for it like `Environment::enter`.
+    /// The invocation is global to uucore and the reactor runs one utility at a time, so the tests
+    /// run them one at a time too.
     fn exec(args: &[&str], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
-        let argv = args.iter().map(OsString::from).collect();
+        static EXEC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _exec = EXEC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        super::super::invocation(args[0], &argv[0]).expect("an invocation");
         let code = match lookup(args[0]).expect("a process") {
             Utility::Main(main) => run(
                 main,
@@ -302,7 +313,7 @@ mod tests {
 
     #[test]
     fn unknown_utility_is_not_a_process() {
-        assert!(lookup("ls").is_none());
+        assert!(lookup("bogus").is_none());
     }
 
     #[cfg(feature = "echo")]
@@ -1023,6 +1034,111 @@ mod tests {
         let expected = format!("{}: FAILED\n", file.display());
         assert_eq!((code, stdout), (1, expected.into_bytes()));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A directory holding the files `b` and `a` and the directory `sub`, removed on drop.
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    struct Listing(std::path::PathBuf);
+
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    impl Listing {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("reactor-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::write(dir.join("b"), b"").unwrap();
+            std::fs::write(dir.join("a"), b"").unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    impl Drop for Listing {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_lists_one_entry_per_line() {
+        let dir = Listing::new("ls");
+        assert_eq!(
+            exec(&["ls", dir.path()], b""),
+            (0, b"a\nb\nsub\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_lists_in_columns_of_the_given_width() {
+        let dir = Listing::new("ls-columns");
+        assert_eq!(
+            exec(&["ls", "-C", "-w", "8", dir.path()], b""),
+            (0, b"a  sub\nb\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_classifies_only_when_asked_to_always() {
+        let dir = Listing::new("ls-classify");
+        assert_eq!(
+            exec(&["ls", "--classify=auto", dir.path()], b""),
+            (0, b"a\nb\nsub\n".to_vec(), Vec::new())
+        );
+        assert_eq!(
+            exec(&["ls", "--classify=always", dir.path()], b""),
+            (0, b"a\nb\nsub/\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_colours_only_when_asked_to_always() {
+        let dir = Listing::new("ls-color");
+        let (code, stdout, _) = exec(&["ls", "--color=auto", dir.path()], b"");
+        assert_eq!((code, stdout), (0, b"a\nb\nsub\n".to_vec()));
+        let (code, stdout, _) = exec(&["ls", "--color=always", dir.path()], b"");
+        assert_eq!(code, 0);
+        assert!(stdout.contains(&0x1b));
+    }
+
+    #[cfg(feature = "dir")]
+    #[test]
+    fn dir_lists_in_columns() {
+        let dir = Listing::new("dir");
+        assert_eq!(
+            exec(&["dir", "-w", "80", dir.path()], b""),
+            (0, b"a  b  sub\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "vdir")]
+    #[test]
+    fn vdir_lists_in_long_format() {
+        let dir = Listing::new("vdir");
+        let (code, stdout, stderr) = exec(&["vdir", dir.path()], b"");
+        let stdout = String::from_utf8(stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!((code, stderr), (0, Vec::new()));
+        assert!(lines[0].starts_with("total "), "{stdout}");
+        assert!(
+            lines[1].starts_with('-') && lines[1].ends_with(" a"),
+            "{stdout}"
+        );
+        assert!(
+            lines[2].starts_with('-') && lines[2].ends_with(" b"),
+            "{stdout}"
+        );
+        assert!(
+            lines[3].starts_with('d') && lines[3].ends_with(" sub"),
+            "{stdout}"
+        );
+        assert_eq!(lines.len(), 4, "{stdout}");
     }
 
     #[cfg(feature = "pwd")]
