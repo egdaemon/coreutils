@@ -232,8 +232,8 @@ enum Source {
     #[cfg(unix)]
     Fifo(File),
 
-    /// Input from the stdin of a dd run in isolation, see [`uumain_with`].
-    Isolated(uucore::io::Stdin),
+    /// Input from the stdin a caller gives, see [`uumain_with`].
+    Given(Box<dyn Read>),
 }
 
 impl Source {
@@ -316,7 +316,7 @@ impl Source {
             Self::File(f) => f.seek(SeekFrom::Current(n.try_into().unwrap())),
             #[cfg(unix)]
             Self::Fifo(f) => uucore::io::read_and_discard(f, n, ibs),
-            Self::Isolated(stdin) => {
+            Self::Given(stdin) => {
                 let m = uucore::io::read_and_discard(stdin, n, ibs)?;
                 if m < n {
                     show_error!(
@@ -368,7 +368,7 @@ impl Read for Source {
             Self::StdinFile(f) => f.read(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.read(buf),
-            Self::Isolated(stdin) => stdin.read(buf),
+            Self::Given(stdin) => stdin.read(buf),
         }
     }
 }
@@ -424,8 +424,8 @@ impl<'a> Input<'a> {
         Ok(Self { src, settings })
     }
 
-    /// Instantiate this struct with the stdin of a dd run in isolation as a source.
-    fn new_isolated(settings: &'a Settings) -> UResult<Self> {
+    /// Instantiate this struct with the stdin a caller gives as a source.
+    fn new_given(settings: &'a Settings, stdin: Box<dyn Read>) -> UResult<Self> {
         if settings.iflags.directory {
             return Err(USimpleError::new(
                 1,
@@ -433,7 +433,7 @@ impl<'a> Input<'a> {
             ));
         }
 
-        let mut src = Source::Isolated(uucore::io::stdin());
+        let mut src = Source::Given(stdin);
         if settings.skip > 0 {
             src.skip(settings.skip, settings.ibs)?;
         }
@@ -631,7 +631,7 @@ enum Density {
 }
 
 /// Data destinations.
-enum Dest {
+enum Dest<'a> {
     /// Output to stdout.
     Stdout(File),
 
@@ -649,15 +649,15 @@ enum Dest {
     #[cfg(unix)]
     Sink,
 
-    /// Output to the stdout of a dd run in isolation, see [`uumain_with`].
-    Isolated(uucore::io::Stdout),
+    /// Output to the stdout a caller gives, see [`uumain_with`].
+    Given(&'a mut dyn Write),
 }
 
-impl Dest {
+impl Dest<'_> {
     fn fsync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
-            Self::Isolated(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_all()
@@ -675,7 +675,7 @@ impl Dest {
     fn fdatasync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
-            Self::Isolated(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_data()
@@ -694,7 +694,7 @@ impl Dest {
     fn seek(&mut self, n: u64, obs: usize) -> io::Result<u64> {
         match self {
             Self::Stdout(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
-            Self::Isolated(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
+            Self::Given(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
             Self::File(f, _) => {
                 #[cfg(unix)]
                 if let Ok(Some(len)) = try_get_len_of_block_device(f)
@@ -817,7 +817,7 @@ fn handle_o_direct_write(
     Err(original_error)
 }
 
-impl Write for Dest {
+impl Write for Dest<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::File(f, Density::Sparse) if is_sparse(buf) => {
@@ -844,7 +844,7 @@ impl Write for Dest {
                 }
             }
             Self::Stdout(stdout) => stdout.write(buf),
-            Self::Isolated(stdout) => stdout.write(buf),
+            Self::Given(stdout) => stdout.write(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.write(buf),
             #[cfg(unix)]
@@ -855,7 +855,7 @@ impl Write for Dest {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
-            Self::Isolated(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => f.flush(),
             #[cfg(unix)]
             Self::Fifo(f) => f.flush(),
@@ -873,7 +873,7 @@ impl Write for Dest {
 /// `dd`.
 struct Output<'a> {
     /// The destination to which bytes will be written.
-    dst: Dest,
+    dst: Dest<'a>,
 
     /// Configuration settings for how to read and write the data.
     settings: &'a Settings,
@@ -889,9 +889,9 @@ impl<'a> Output<'a> {
         Ok(Self { dst, settings })
     }
 
-    /// Instantiate this struct with the stdout of a dd run in isolation as a destination.
-    fn new_isolated(settings: &'a Settings) -> UResult<Self> {
-        let mut dst = Dest::Isolated(uucore::io::stdout());
+    /// Instantiate this struct with the stdout a caller gives as a destination.
+    fn new_given(settings: &'a Settings, stdout: &'a mut dyn Write) -> UResult<Self> {
+        let mut dst = Dest::Given(stdout);
         dst.seek(settings.seek, settings.obs)
             .map_err_context(|| translate!("dd-error-write-error"))?;
         Ok(Self { dst, settings })
@@ -1669,7 +1669,7 @@ fn is_fifo(filename: &str) -> bool {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    dd(args, false)
+    dd(args, None, None)
 }
 
 /// Runs dd like [`uumain`], isolated from the process's standard streams: without `if=` or `of=`,
@@ -1679,10 +1679,16 @@ pub fn uumain_with(
     stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    uucore::io::isolate(stdin, stdout, || dd(args, true))?
+    dd(args, Some(stdin), Some(stdout))
 }
 
-fn dd(args: impl uucore::Args, isolated: bool) -> UResult<()> {
+/// Runs dd, reading `stdin` and writing `stdout` in place of the process's streams when they are
+/// given.
+fn dd(
+    args: impl uucore::Args,
+    stdin: Option<Box<dyn Read>>,
+    stdout: Option<&mut dyn Write>,
+) -> UResult<()> {
     // The command line is kept for the caret in operand diagnostics.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
         uu_app(),
@@ -1702,20 +1708,22 @@ fn dd(args: impl uucore::Args, isolated: bool) -> UResult<()> {
         return Err(USimpleError::new(1, "write error"));
     }
 
-    let i = match settings.infile {
+    let i = match (&settings.infile, stdin) {
         #[cfg(unix)]
-        Some(ref infile) if is_fifo(infile) => Input::new_fifo(Path::new(&infile), &settings)?,
-        Some(ref infile) => Input::new_file(Path::new(&infile), &settings)?,
-        None if isolated => Input::new_isolated(&settings)?,
-        None => Input::new_stdin(&settings)?,
+        (Some(infile), _) if is_fifo(infile) => Input::new_fifo(Path::new(&infile), &settings)?,
+        (Some(infile), _) => Input::new_file(Path::new(&infile), &settings)?,
+        (None, Some(stdin)) => Input::new_given(&settings, stdin)?,
+        (None, None) => Input::new_stdin(&settings)?,
     };
-    let o = match settings.outfile {
+    let o = match (&settings.outfile, stdout) {
         #[cfg(unix)]
-        Some(ref outfile) if is_fifo(outfile) => Output::new_fifo(Path::new(&outfile), &settings)?,
-        Some(ref outfile) => Output::new_file(Path::new(&outfile), &settings)?,
-        None if isolated => Output::new_isolated(&settings)?,
-        None if is_stdout_redirected_to_seekable_file() => Output::new_file_from_stdout(&settings)?,
-        None => Output::new_stdout(&settings)?,
+        (Some(outfile), _) if is_fifo(outfile) => Output::new_fifo(Path::new(&outfile), &settings)?,
+        (Some(outfile), _) => Output::new_file(Path::new(&outfile), &settings)?,
+        (None, Some(stdout)) => Output::new_given(&settings, stdout)?,
+        (None, None) if is_stdout_redirected_to_seekable_file() => {
+            Output::new_file_from_stdout(&settings)?
+        }
+        (None, None) => Output::new_stdout(&settings)?,
     };
     dd_copy(i, o).map_err_context(|| translate!("dd-error-io-error"))
 }
