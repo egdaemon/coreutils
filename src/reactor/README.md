@@ -86,4 +86,4 @@ which write their output as each chunk of stdin arrives.
 | unlink    | yes          |        |
 | vdir      | no           | layout and colour depend on the terminal |
 | wc        | yes          |        |
-| yes       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| yes       | no           | never exits: the reactor buffers a utility's whole output before writing it |
