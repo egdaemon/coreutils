@@ -102,6 +102,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "unexpand" => unexpand,
             "uniq" => uniq,
             "unlink" => unlink,
+            "wc" => wc,
         ),
     }
 }
@@ -397,6 +398,44 @@ mod tests {
             "==> {} <==\n1\n\n==> 'standard input' <==\nx\n",
             file.display()
         );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "wc")]
+    #[test]
+    fn wc_counts_stdin() {
+        assert_eq!(
+            exec(&["wc"], b"a b\nc\n"),
+            (0, b"      2       3       6\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "wc")]
+    #[test]
+    fn wc_counts_the_bytes_of_stdin() {
+        assert_eq!(
+            exec(&["wc", "-c"], b"abcd"),
+            (0, b"4\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "wc")]
+    #[test]
+    fn wc_reads_file_names_from_stdin() {
+        let dir = env::temp_dir().join(format!("reactor-wc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"1\n2\n").unwrap();
+
+        let (code, stdout, stderr) = exec(
+            &["wc", "-l", "--files0-from=-"],
+            format!("{}\0", file.display()).as_bytes(),
+        );
+        let expected = format!("2 {}\n", file.display());
         assert_eq!(
             (code, stdout, stderr),
             (0, expected.into_bytes(), Vec::new())

@@ -85,5 +85,5 @@ which write their output as each chunk of stdin arrives.
 | uniq      | yes          |        |
 | unlink    | yes          |        |
 | vdir      | no           | layout and colour depend on the terminal |
-| wc        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| wc        | yes          |        |
 | yes       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
