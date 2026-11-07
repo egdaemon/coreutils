@@ -98,6 +98,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "sum" => sum,
             "tac" => tac,
             "tail" => tail,
+            "test" => uu_test,
             "tr" => tr,
             "truncate" => truncate,
             "true" => r#true,
@@ -544,6 +545,20 @@ mod tests {
     #[test]
     fn false_fails() {
         assert_eq!(exec(&["false"], b""), (1, Vec::new(), Vec::new()));
+    }
+
+    #[cfg(feature = "test")]
+    #[test]
+    fn test_evaluates_its_expression() {
+        assert_eq!(exec(&["test", "a", "=", "a"], b"").0, 0);
+        assert_eq!(exec(&["test", "a", "=", "b"], b"").0, 1);
+    }
+
+    #[cfg(feature = "test")]
+    #[test]
+    fn test_has_no_terminals() {
+        assert_eq!(exec(&["test", "-t", "0"], b""), (1, Vec::new(), Vec::new()));
+        assert_eq!(exec(&["test", "-t", "1"], b""), (1, Vec::new(), Vec::new()));
     }
 
     #[cfg(feature = "pwd")]

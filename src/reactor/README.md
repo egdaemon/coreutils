@@ -73,7 +73,7 @@ which write their output as each chunk of stdin arrives.
 | tac       | yes          |        |
 | tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |
 | tee       | yes, streams |        |
-| test      | no           | shell builtin; `-t` needs `isatty` |
+| test      | yes          | `-t` is false: a process has no terminal |
 | touch     | no           | not ported yet |
 | tr        | yes          |        |
 | true      | yes          |        |
