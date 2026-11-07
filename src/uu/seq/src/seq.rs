@@ -157,7 +157,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs seq like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    _stdin: &mut dyn std::io::Read,
+    _stdin: Box<dyn std::io::Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     seq_with(args, stdout)

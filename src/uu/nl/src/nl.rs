@@ -6,7 +6,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::{IntErrorKind, ParseIntError};
 use std::path::Path;
 use uucore::display::Quotable;
@@ -239,6 +239,19 @@ fn parse_join_blank_lines(s: &str) -> Result<u64, ParseIntError> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    nl_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs nl like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    nl_with(args, &mut *stdin, stdout)
+}
+
+fn nl_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let mut settings = Settings::default();
@@ -266,8 +279,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     for file in &files {
         if file == "-" {
-            let mut buffer = BufReader::new(stdin());
-            nl(&mut buffer, &mut stats, &settings)?;
+            let mut buffer = BufReader::new(&mut *stdin);
+            nl(&mut buffer, &mut stats, &settings, stdout)?;
         } else {
             let path = Path::new(file);
 
@@ -281,7 +294,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 match File::open(path) {
                     Ok(reader) => {
                         let mut buffer = BufReader::new(reader);
-                        nl(&mut buffer, &mut stats, &settings)?;
+                        nl(&mut buffer, &mut stats, &settings, stdout)?;
                     }
                     Err(e) => {
                         show_error!("{}", e.map_err_context(|| file.maybe_quote().to_string()));
@@ -413,8 +426,13 @@ fn write_line(writer: &mut impl Write, line: &[u8]) -> io::Result<()> {
 }
 
 /// `nl` implements the main functionality for an individual buffer.
-fn nl<T: Read>(reader: &mut BufReader<T>, stats: &mut Stats, settings: &Settings) -> UResult<()> {
-    let mut writer = BufWriter::new(stdout());
+fn nl<T: Read>(
+    reader: &mut BufReader<T>,
+    stats: &mut Stats,
+    settings: &Settings,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let mut writer = BufWriter::new(stdout);
     let mut line = Vec::new();
     // Written before every unnumbered line. Capped to avoid OOM on 32-bit targets
     // when -w i32::MAX is passed (allocating 2 GiB would panic).

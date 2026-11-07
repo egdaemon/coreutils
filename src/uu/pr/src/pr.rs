@@ -10,7 +10,7 @@ use itertools::Itertools;
 use regex::Regex;
 use std::ffi::{OsStr, OsString};
 use std::fs::metadata;
-use std::io::{self, Read, Write, stderr, stdin, stdout};
+use std::io::{self, Read, Write, stderr};
 use std::num::IntErrorKind;
 use std::path::PathBuf;
 use std::str::Utf8Error;
@@ -387,6 +387,19 @@ pub fn uu_app() -> Command {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    pr_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs pr like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    pr_with(args, &mut *stdin, stdout)
+}
+
+fn pr_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let args: Vec<_> = args.collect();
 
     let mut command = uu_app();
@@ -419,10 +432,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             }
         };
 
-        let cmd_result = file_group
-            .iter()
-            .exactly_one()
-            .map_or_else(|_| mpr(&file_group, &options), |group| pr(group, &options));
+        let cmd_result = match file_group.iter().exactly_one() {
+            Ok(group) => pr(group, &options, &mut *stdin, &mut *stdout),
+            Err(_) => mpr(&file_group, &options, &mut *stdin, &mut *stdout),
+        };
 
         if let Err(e) = cmd_result {
             print_error(&matches, &e);
@@ -1094,11 +1107,10 @@ fn build_options(
 /// Read the entire contents of the given path into memory.
 ///
 /// If `name` is `"-"`, then read from stdin.
-fn read_to_end(name: &OsStr) -> Result<Vec<u8>, PrError> {
+fn read_to_end(name: &OsStr, stdin: &mut dyn Read) -> Result<Vec<u8>, PrError> {
     if name == "-" {
-        let mut f = stdin();
         let mut buf = vec![];
-        f.read_to_end(&mut buf).map_err(PrError::Read)?;
+        stdin.read_to_end(&mut buf).map_err(PrError::Read)?;
         Ok(buf)
     } else {
         let path = PathBuf::from(name);
@@ -1127,13 +1139,18 @@ fn apply_expand_tab(chunk: &mut Vec<u8>, byte: u8, expand_options: &ExpandTabsOp
     }
 }
 
-fn pr(name: &OsStr, options: &OutputOptions) -> Result<i32, PrError> {
+fn pr(
+    name: &OsStr,
+    options: &OutputOptions,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> Result<i32, PrError> {
     // Read the entire contents of the file into a buffer.
     //
     // TODO Read incrementally.
-    let buf = read_to_end(name)?;
+    let buf = read_to_end(name, stdin)?;
 
-    let mut writer = stdout().lock();
+    let mut writer = stdout;
     let (pages, page_count) = get_pages(options, 0, &buf);
     if options.start_page > page_count {
         show_error!(
@@ -1304,6 +1321,7 @@ fn group_lines(num_files: usize, lines: Vec<FileLine>) -> Vec<(usize, Vec<FileLi
 fn get_file_line_groups(
     options: &OutputOptions,
     paths: &[&OsStr],
+    stdin: &mut dyn Read,
 ) -> Result<Vec<(usize, Vec<FileLine>)>, PrError> {
     let num_files = paths.len();
     let mut all_lines = vec![];
@@ -1311,7 +1329,7 @@ fn get_file_line_groups(
         // Read the entire contents of the file into a buffer.
         //
         // TODO Read incrementally.
-        let buf = read_to_end(path)?;
+        let buf = read_to_end(path, &mut *stdin)?;
 
         // Split the text into pages and collect each line for
         // subsequent grouping.
@@ -1326,14 +1344,19 @@ fn get_file_line_groups(
     Ok(group_lines(num_files, all_lines))
 }
 
-fn mpr(paths: &[&OsStr], options: &OutputOptions) -> Result<i32, PrError> {
-    let file_line_groups = get_file_line_groups(options, paths)?;
+fn mpr(
+    paths: &[&OsStr],
+    options: &OutputOptions,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> Result<i32, PrError> {
+    let file_line_groups = get_file_line_groups(options, paths, stdin)?;
 
     if file_line_groups.is_empty() {
         return Ok(0);
     }
 
-    let mut writer = stdout().lock();
+    let mut writer = stdout;
     let start_page = options.start_page;
     let mut lines = Vec::new();
     let mut page_counter = start_page;

@@ -43,6 +43,17 @@ fn get_encodings() -> Vec<(&'static str, Format, String)> {
     ]
 }
 
+/// Runs basenc like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn std::io::Read>,
+    stdout: &mut dyn std::io::Write,
+) -> UResult<()> {
+    let (config, format) = parse_cmd_args(args)?;
+    let mut input = base_common::get_input_from(&config, stdin)?;
+    base_common::handle_input_to(&mut input, format, config, stdout)
+}
+
 pub fn uu_app() -> Command {
     let encodings = get_encodings();
     let mut command = base_common::base_app(translate!("basenc-about"), translate!("basenc-usage"))

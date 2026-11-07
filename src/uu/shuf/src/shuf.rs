@@ -7,7 +7,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::num::IntErrorKind;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -69,6 +69,19 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    shuf_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs shuf like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    shuf_with(args, &mut *stdin, stdout)
+}
+
+fn shuf_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let mode = if matches.get_flag(options::ECHO) {
@@ -157,11 +170,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     let fdata = match mode {
-        Mode::Default(ref filename) => Some(read_input_file(filename)?),
+        Mode::Default(ref filename) => Some(read_input_file(filename, stdin)?),
         _ => None,
     };
 
-    let mut output = open_output(options.output.as_deref())?;
+    let mut output = open_output(options.output.as_deref(), stdout)?;
 
     match mode {
         Mode::Echo(args) => {
@@ -264,9 +277,12 @@ pub fn uu_app() -> Command {
         )
 }
 
-fn open_output(output: Option<&Path>) -> UResult<BufWriter<Box<dyn OsWrite>>> {
-    let writer: Box<dyn OsWrite> = match output {
-        None => Box::new(stdout()),
+fn open_output<'a>(
+    output: Option<&Path>,
+    stdout: &'a mut dyn Write,
+) -> UResult<BufWriter<Box<dyn OsWrite + 'a>>> {
+    let writer: Box<dyn OsWrite + 'a> = match output {
+        None => Box::new(stdout),
         Some(s) => {
             let file = File::create(s).map_err_context(
                 || translate!("shuf-error-failed-to-open-for-writing", "file" => s.quote()),
@@ -277,10 +293,10 @@ fn open_output(output: Option<&Path>) -> UResult<BufWriter<Box<dyn OsWrite>>> {
     Ok(BufWriter::with_capacity(BUF_SIZE, writer))
 }
 
-fn read_input_file(filename: &Path) -> UResult<Vec<u8>> {
+fn read_input_file(filename: &Path, stdin: &mut dyn Read) -> UResult<Vec<u8>> {
     if filename.as_os_str() == "-" {
         let mut data = Vec::new();
-        stdin()
+        stdin
             .read_to_end(&mut data)
             .map_err_context(|| translate!("shuf-error-read-error"))?;
         Ok(data)
@@ -421,7 +437,7 @@ fn shuf_exec(
     input: &mut impl Shufable,
     opts: &Options,
     rng: &mut WrappedRng,
-    output: &mut BufWriter<Box<dyn OsWrite>>,
+    output: &mut BufWriter<Box<dyn OsWrite + '_>>,
 ) -> UResult<()> {
     let sep = [opts.sep];
     if opts.repeat {

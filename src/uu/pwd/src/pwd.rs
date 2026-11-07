@@ -119,7 +119,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs pwd like [`uumain`], isolated from the process's standard streams. pwd reads no input.
 pub fn uumain_with(
     args: impl uucore::Args,
-    _stdin: &mut dyn Read,
+    _stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     pwd(args, |cwd| {

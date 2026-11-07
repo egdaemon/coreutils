@@ -266,7 +266,7 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
             (Utility::Main(main), None) => {
                 let argv = std::mem::take(&mut proc.argv);
                 let input = std::mem::take(&mut proc.stdin);
-                run(main, argv, &mut input.as_slice(), stdout, stderr)
+                run(main, argv, Box::new(io::Cursor::new(input)), stdout, stderr)
             }
             (Utility::Stream(_), None) => unreachable!("a stream is started before stdin is read"),
         });

@@ -108,7 +108,12 @@ impl<T: BufRead> Iterator for LinesWithNewlines<T> {
 /// - [`CsplitError::MatchNotFound`] if no line matched a regular expression.
 /// - [`CsplitError::MatchNotFoundOnRepetition`], like previous but after applying the pattern
 ///   more than once.
-pub fn csplit<T>(options: &CsplitOptions, patterns: &[&str], input: T) -> Result<(), CsplitError>
+pub fn csplit<T>(
+    options: &CsplitOptions,
+    patterns: &[&str],
+    input: T,
+    stdout: &mut dyn Write,
+) -> Result<(), CsplitError>
 where
     T: BufRead,
 {
@@ -116,7 +121,7 @@ where
         .map(|line| line.map_err_context(|| translate!("csplit-read-error")))
         .enumerate();
     let mut input_iter = InputSplitter::new(enumerated_input_lines);
-    let mut split_writer = SplitWriter::new(options);
+    let mut split_writer = SplitWriter::new(options, stdout);
     let patterns_vec: Vec<patterns::Pattern> = patterns::get_patterns(patterns)?;
     // A `{*}` regex only stops once it no longer matches, and by then it has
     // consumed the rest of the input.
@@ -252,6 +257,8 @@ where
 struct SplitWriter<'a> {
     /// the options set through the command line
     options: &'a CsplitOptions,
+    /// where the size of each split is reported
+    stdout: &'a mut dyn Write,
     /// a split counter
     counter: usize,
     /// the writer to the current split
@@ -265,9 +272,10 @@ struct SplitWriter<'a> {
 }
 
 impl SplitWriter<'_> {
-    fn new(options: &CsplitOptions) -> SplitWriter<'_> {
+    fn new<'a>(options: &'a CsplitOptions, stdout: &'a mut dyn Write) -> SplitWriter<'a> {
         SplitWriter {
             options,
+            stdout,
             counter: 0,
             current_writer: None,
             size: 0,
@@ -342,7 +350,7 @@ impl SplitWriter<'_> {
                 self.current_writer = None;
                 let _ = remove_file(self.options.split_name.get(self.counter));
             } else if !self.options.quiet {
-                writeln!(io::stdout(), "{}", self.size).map_err(CsplitError::IoError)?;
+                writeln!(self.stdout, "{}", self.size).map_err(CsplitError::IoError)?;
             }
         }
         Ok(())
@@ -638,6 +646,23 @@ where
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    csplit_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs csplit like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    csplit_with(args, &mut *stdin, stdout)
+}
+
+fn csplit_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in pattern diagnostics, which needs the operands as
     // typed.
@@ -670,12 +695,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let options = CsplitOptions::new(&matches).map_err(report)?;
     if file_name == "-" {
-        let stdin = io::stdin();
-        csplit(&options, &patterns, stdin.lock()).map_err(report)?;
+        csplit(&options, &patterns, BufReader::new(stdin), stdout).map_err(report)?;
     } else {
         let file = File::open(file_name)
             .map_err_context(|| format!("cannot open {} for reading", file_name.quote()))?;
-        csplit(&options, &patterns, BufReader::new(file)).map_err(report)?;
+        csplit(&options, &patterns, BufReader::new(file), stdout).map_err(report)?;
     }
     Ok(())
 }

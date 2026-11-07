@@ -157,10 +157,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs factor like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: &mut dyn io::Read,
+    mut stdin: Box<dyn io::Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    factor_with(args, stdin, stdout)
+    factor_with(args, &mut *stdin, stdout)
 }
 
 fn factor_with(

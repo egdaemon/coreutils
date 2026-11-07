@@ -5,10 +5,12 @@
 
 // spell-checker:ignore (ToDO) delim mkdelim pairable
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Stdin, Write, stderr, stdin};
+use std::io::{self, BufRead, BufReader, BufWriter, Write, stderr};
+use std::rc::Rc;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult, USimpleError};
 use uucore::format_usage;
@@ -84,15 +86,14 @@ fn line_cmp(a: &[u8], b: &[u8], line_ending: u8, use_locale: bool) -> Ordering {
 }
 
 enum Input {
-    // Locked per read rather than once, so that `comm - -` reads both operands
-    // from the one shared stdin buffer instead of blocking on a second lock.
-    Stdin(Stdin),
+    // Shared, so that `comm - -` reads both operands from the one stdin buffer.
+    Stdin(Rc<RefCell<BufReader<Box<dyn io::Read>>>>),
     FileIn(BufReader<File>),
 }
 
 impl Input {
-    fn stdin() -> Self {
-        Self::Stdin(stdin())
+    fn stdin(stdin: &Rc<RefCell<BufReader<Box<dyn io::Read>>>>) -> Self {
+        Self::Stdin(Rc::clone(stdin))
     }
 
     fn from_file(f: File) -> Self {
@@ -114,7 +115,7 @@ impl LineReader {
         let line_ending = self.line_ending.into();
 
         let result = match &mut self.input {
-            Input::Stdin(r) => r.lock().read_until(line_ending, buf),
+            Input::Stdin(r) => r.borrow_mut().read_until(line_ending, buf),
             Input::FileIn(r) => r.read_until(line_ending, buf),
         };
 
@@ -188,6 +189,7 @@ fn comm(
     filename2: &OsString,
     delim: &str,
     opts: &ArgMatches,
+    stdout: &mut dyn Write,
 ) -> UResult<()> {
     // Hoist clap lookups out of the per-line loop.
     let print_col_1 = !opts.get_flag(options::COLUMN_1);
@@ -199,7 +201,7 @@ fn comm(
     let delim_col_2 = delim.repeat(width_col_1);
     let delim_col_3 = delim.repeat(width_col_1 + width_col_2);
 
-    let mut writer = BufWriter::new(io::stdout().lock());
+    let mut writer = BufWriter::new(stdout);
 
     let ra = &mut Vec::new();
     let mut na = a
@@ -323,9 +325,13 @@ fn comm(
     }
 }
 
-fn open_file(name: &OsString, line_ending: LineEnding) -> io::Result<LineReader> {
+fn open_file(
+    name: &OsString,
+    line_ending: LineEnding,
+    stdin: &Rc<RefCell<BufReader<Box<dyn io::Read>>>>,
+) -> io::Result<LineReader> {
     if name == "-" {
-        Ok(LineReader::new(Input::stdin(), line_ending))
+        Ok(LineReader::new(Input::stdin(stdin), line_ending))
     } else {
         // some platforms shows different read error
         // try to override the error message, but failure of it is not serious
@@ -340,7 +346,25 @@ fn open_file(name: &OsString, line_ending: LineEnding) -> io::Result<LineReader>
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    comm_with(args, Box::new(io::stdin()), &mut io::stdout().lock())
+}
+
+/// Runs comm like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    comm_with(args, stdin, stdout)
+}
+
+fn comm_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
+    let stdin = Rc::new(RefCell::new(BufReader::new(stdin)));
 
     let mut collator_opts = CollatorOptions::default();
     collator_opts.alternate_handling = Some(AlternateHandling::Shifted);
@@ -349,9 +373,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let line_ending = LineEnding::from_zero_flag(matches.get_flag(options::ZERO_TERMINATED));
     let filename1 = matches.get_one::<OsString>(options::FILE_1).unwrap();
     let filename2 = matches.get_one::<OsString>(options::FILE_2).unwrap();
-    let mut f1 = open_file(filename1, line_ending)
+    let mut f1 = open_file(filename1, line_ending, &stdin)
         .map_err_context(|| filename1.maybe_quote().to_string())?;
-    let mut f2 = open_file(filename2, line_ending)
+    let mut f2 = open_file(filename2, line_ending, &stdin)
         .map_err_context(|| filename2.maybe_quote().to_string())?;
 
     // Due to default_value(), there must be at least one value here, thus unwrap() must not panic.
@@ -376,7 +400,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         delim => delim,
     };
 
-    comm(&mut f1, &mut f2, filename1, filename2, delim, &matches)
+    comm(
+        &mut f1, &mut f2, filename1, filename2, delim, &matches, stdout,
+    )
 }
 
 pub fn uu_app() -> Command {

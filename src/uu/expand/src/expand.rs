@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::num::IntErrorKind;
 use std::path::Path;
 use std::str::from_utf8;
@@ -212,10 +212,27 @@ fn expand_shortcuts(args: Vec<OsString>) -> Vec<OsString> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    expand_with(args, &mut std::io::stdin(), &mut std::io::stdout().lock())
+}
+
+/// Runs expand like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    expand_with(args, &mut *stdin, stdout)
+}
+
+fn expand_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches =
         uucore::clap_localization::handle_clap_result(uu_app(), expand_shortcuts(args.collect()))?;
 
-    expand(&Options::new(&matches)?)
+    expand(&Options::new(&matches)?, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -259,9 +276,9 @@ pub fn uu_app() -> Command {
     )
 }
 
-fn open(path: &OsString) -> UResult<BufReader<Box<dyn Read>>> {
+fn open<'a>(path: &OsString, stdin: &'a mut dyn Read) -> UResult<BufReader<Box<dyn Read + 'a>>> {
     if path == "-" {
-        return Ok(BufReader::new(Box::new(stdin()) as Box<dyn Read>));
+        return Ok(BufReader::new(Box::new(stdin) as Box<dyn Read + 'a>));
     }
     let path_ref = Path::new(path);
     // some platforms cannot catch this as read error. accept additional overhead.
@@ -368,7 +385,7 @@ fn write_spaces(output: &mut impl Write, mut n: usize) -> std::io::Result<()> {
 
 fn expand_buf(
     buf: &[u8],
-    output: &mut BufWriter<std::io::Stdout>,
+    output: &mut BufWriter<&mut dyn Write>,
     tabstops: &[usize],
     options: &Options,
     col: &mut usize,
@@ -446,10 +463,11 @@ fn expand_buf(
 
 fn expand_file(
     file: &OsString,
-    output: &mut BufWriter<std::io::Stdout>,
+    output: &mut BufWriter<&mut dyn Write>,
     options: &Options,
+    stdin: &mut dyn Read,
 ) -> UResult<()> {
-    let mut input = open(file)?;
+    let mut input = open(file, stdin)?;
     let ts = options.tabstops.as_ref();
     let mut col = 0;
     loop {
@@ -467,11 +485,11 @@ fn expand_file(
     Ok(())
 }
 
-fn expand(options: &Options) -> UResult<()> {
-    let mut output = BufWriter::new(stdout());
+fn expand(options: &Options, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
+    let mut output = BufWriter::new(stdout);
 
     for file in &options.files {
-        if let Err(e) = expand_file(file, &mut output, options) {
+        if let Err(e) = expand_file(file, &mut output, options, &mut *stdin) {
             show!(e);
             set_exit_code(1);
         }

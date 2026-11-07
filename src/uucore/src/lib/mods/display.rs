@@ -124,8 +124,9 @@ impl<W: OsWrite> OsWrite for BufWriter<W> {}
 
 // The standard streams of a utility run in isolation, see `uumain_with`.
 impl OsWrite for dyn io::Write + '_ {}
+impl<W: OsWrite + ?Sized> OsWrite for &mut W {}
 
-impl OsWrite for Box<dyn OsWrite> {
+impl OsWrite for Box<dyn OsWrite + '_> {
     fn write_all_os(&mut self, buf: &OsStr) -> io::Result<()> {
         let this: &mut dyn OsWrite = self;
         this.write_all_os(buf)

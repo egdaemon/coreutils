@@ -57,7 +57,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs tr like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: &mut dyn Read,
+    stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     tr(args, &mut BufReader::new(stdin), &mut &mut *stdout, || {

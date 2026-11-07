@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use uucore::error::{UError, UResult};
 
 /// The `uumain_with` of a utility.
-pub type UUMain = fn(std::vec::IntoIter<OsString>, &mut dyn Read, &mut dyn Write) -> UResult<()>;
+pub type UUMain = fn(std::vec::IntoIter<OsString>, Box<dyn Read>, &mut dyn Write) -> UResult<()>;
 
 /// A utility that consumes its stdin a chunk at a time as it arrives, so its output streams.
 pub trait Stream {
@@ -58,29 +58,48 @@ pub fn lookup(util: &str) -> Option<Utility> {
         "tee" => Some(Utility::Stream(tee)),
         util => mains!(util,
             "arch" => arch,
+            "base32" => base32,
+            "base64" => base64,
             "basename" => basename,
+            "basenc" => basenc,
+            "comm" => comm,
+            "csplit" => csplit,
             "date" => date,
             "dircolors" => dircolors,
             "dirname" => dirname,
             "echo" => echo,
+            "expand" => expand,
             "expr" => expr,
             "factor" => factor,
+            "fmt" => fmt,
+            "fold" => fold,
             "hostid" => hostid,
+            "join" => join,
             "link" => link,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
+            "nl" => nl,
             "nproc" => nproc,
+            "paste" => paste,
+            "pr" => pr,
             "printenv" => printenv,
             "printf" => printf,
+            "ptx" => ptx,
             "pwd" => pwd,
             "readlink" => readlink,
             "realpath" => realpath,
             "rmdir" => rmdir,
             "seq" => seq,
+            "shuf" => shuf,
             "sleep" => sleep,
+            "sum" => sum,
+            "tac" => tac,
             "tr" => tr,
             "truncate" => truncate,
+            "tsort" => tsort,
             "uname" => uname,
+            "unexpand" => unexpand,
+            "uniq" => uniq,
             "unlink" => unlink,
         ),
     }
@@ -110,7 +129,7 @@ fn tee(argv: Vec<OsString>, stderr: &mut dyn Write) -> Result<Box<dyn Stream>, i
 pub fn run(
     main: UUMain,
     argv: Vec<OsString>,
-    stdin: &mut dyn Read,
+    stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -206,7 +225,13 @@ mod tests {
         let argv = args.iter().map(OsString::from).collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let code = match lookup(args[0]).expect("a process") {
-            Utility::Main(main) => run(main, argv, &mut &stdin[..], &mut stdout, &mut stderr),
+            Utility::Main(main) => run(
+                main,
+                argv,
+                Box::new(io::Cursor::new(stdin.to_vec())),
+                &mut stdout,
+                &mut stderr,
+            ),
             Utility::Stream(spawn) => match spawn(argv, &mut stderr) {
                 Ok(mut s) => match s.write(stdin, &mut stdout) {
                     Ok(()) => s.finish(),
@@ -318,6 +343,24 @@ mod tests {
         assert_eq!(
             exec(&["factor"], b"12\n"),
             (0, b"12: 2 2 3\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "uniq")]
+    #[test]
+    fn uniq_filters_stdin() {
+        assert_eq!(
+            exec(&["uniq"], b"a\na\nb\n"),
+            (0, b"a\nb\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "paste")]
+    #[test]
+    fn paste_shares_stdin_between_operands() {
+        assert_eq!(
+            exec(&["paste", "-", "-"], b"a\nb\nc\nd\n"),
+            (0, b"a\tb\nc\td\n".to_vec(), Vec::new())
         );
     }
 

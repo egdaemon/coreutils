@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Stdout, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult, USimpleError};
@@ -73,7 +73,7 @@ mod options {
     pub const FILES_AFTER_DASHES: &str = "files-after-dashes";
 }
 
-pub type FileOrStdReader = BufReader<Box<dyn Read + 'static>>;
+pub type FileOrStdReader<'r> = dyn BufRead + 'r;
 
 pub struct FmtOptions {
     crown: bool,
@@ -203,10 +203,11 @@ impl FmtOptions {
 fn process_file(
     file_name: &OsString,
     fmt_opts: &FmtOptions,
-    ostream: &mut BufWriter<Stdout>,
+    ostream: &mut dyn Write,
+    stdin: &mut dyn Read,
 ) -> UResult<()> {
     let mut fp = BufReader::new(if file_name == "-" {
-        Box::new(stdin()) as Box<dyn Read + 'static>
+        Box::new(stdin) as Box<dyn Read + '_>
     } else {
         let path = Path::new(file_name);
         // Like GNU fmt, report a file that can't be read and go on with the next one.
@@ -236,7 +237,7 @@ fn process_file(
             }
         }
 
-        Box::new(f) as Box<dyn Read + 'static>
+        Box::new(f) as Box<dyn Read + '_>
     });
 
     let p_stream = ParagraphStream::new(fmt_opts, &mut fp);
@@ -379,6 +380,19 @@ fn preserve_prefix_equals(args: &mut [OsString]) -> UResult<()> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    fmt_with(args, &mut std::io::stdin(), &mut std::io::stdout().lock())
+}
+
+/// Runs fmt like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    fmt_with(args, &mut *stdin, stdout)
+}
+
+fn fmt_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let mut args: Vec<_> = args.collect();
 
     // Warn the user if it looks like we're trying to pass a number in the first
@@ -404,10 +418,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let fmt_opts = FmtOptions::from_matches(&matches)?;
 
-    let mut ostream = BufWriter::new(stdout());
+    let mut ostream = BufWriter::new(stdout);
 
     for file_name in &files {
-        process_file(file_name, &fmt_opts, &mut ostream)?;
+        process_file(file_name, &fmt_opts, &mut ostream, &mut *stdin)?;
     }
 
     Ok(())

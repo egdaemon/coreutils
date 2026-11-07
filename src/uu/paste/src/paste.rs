@@ -7,7 +7,7 @@ use clap::{Arg, ArgAction, Command};
 use std::cell::{OnceCell, RefCell};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Stdin, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::iter::Cycle;
 use std::path::Path;
 use std::rc::Rc;
@@ -28,6 +28,27 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    paste_with(
+        args,
+        Box::new(std::io::stdin()),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// Runs paste like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    paste_with(args, stdin, stdout)
+}
+
+fn paste_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let serial = matches.get_flag(options::SERIAL);
@@ -39,7 +60,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .collect();
     let line_ending = LineEnding::from_zero_flag(matches.get_flag(options::ZERO_TERMINATED));
 
-    paste(files, serial, delimiters, line_ending)
+    paste(files, serial, delimiters, line_ending, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -92,10 +113,13 @@ fn paste(
     serial: bool,
     delimiters: &OsString,
     line_ending: LineEnding,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
 ) -> UResult<()> {
     let unescaped_and_encoded_delimiters = parse_delimiters(delimiters)?;
 
-    let stdin_once_cell = OnceCell::<Rc<RefCell<Stdin>>>::new();
+    let mut stdin = Some(stdin);
+    let stdin_once_cell = OnceCell::<Rc<RefCell<BufReader<Box<dyn Read>>>>>::new();
 
     let mut input_source_vec = Vec::with_capacity(filenames.len());
 
@@ -103,7 +127,11 @@ fn paste(
         let input_source = if filename == "-" {
             InputSource::StandardInput(
                 stdin_once_cell
-                    .get_or_init(|| Rc::new(RefCell::new(stdin())))
+                    .get_or_init(|| {
+                        Rc::new(RefCell::new(BufReader::new(
+                            stdin.take().expect("stdin is shared after its first use"),
+                        )))
+                    })
                     .clone(),
             )
         } else {
@@ -117,14 +145,13 @@ fn paste(
 
     let line_ending_byte = u8::from(line_ending);
     let input_source_vec_len = input_source_vec.len();
-    let mut stdout = stdout().lock();
 
     if !serial && input_source_vec_len == 1 {
         // With a single input source (no -s), `paste` output is identical to input,
         // except that a missing final line ending must be added.
         // Stream directly to avoid unbounded line buffering on inputs like /dev/zero.
         return write_single_input_source(
-            &mut stdout,
+            stdout,
             input_source_vec
                 .pop()
                 .expect("input_source_vec_len was checked to be exactly one"),
@@ -205,7 +232,7 @@ fn paste(
 }
 
 fn write_single_input_source(
-    writer: &mut impl Write,
+    writer: &mut dyn Write,
     mut input_source: InputSource,
     line_ending_byte: u8,
 ) -> UResult<()> {
@@ -379,7 +406,7 @@ impl<'a> DelimiterState<'a> {
 enum InputSource {
     /// An opened file and the name it was given as, for error messages.
     File(BufReader<File>, OsString),
-    StandardInput(Rc<RefCell<Stdin>>),
+    StandardInput(Rc<RefCell<BufReader<Box<dyn Read>>>>),
 }
 
 impl InputSource {
@@ -389,11 +416,10 @@ impl InputSource {
                 .read(buf)
                 .map_err_context(|| name.maybe_quote().to_string())?,
             Self::StandardInput(rc) => rc
-                .try_borrow()
+                .try_borrow_mut()
                 .map_err(|bo| {
                     USimpleError::new(1, translate!("paste-error-stdin-borrow", "error" => bo))
                 })?
-                .lock()
                 .read(buf)?,
         };
 
@@ -406,11 +432,10 @@ impl InputSource {
                 .read_until(byte, buf)
                 .map_err_context(|| name.maybe_quote().to_string())?,
             Self::StandardInput(rc) => rc
-                .try_borrow()
+                .try_borrow_mut()
                 .map_err(|bo| {
                     USimpleError::new(1, translate!("paste-error-stdin-borrow", "error" => bo))
                 })?
-                .lock()
                 .read_until(byte, buf)?,
         };
 

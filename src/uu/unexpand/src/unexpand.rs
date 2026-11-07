@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Stdin, Stdout, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::IntErrorKind;
 use uucore::char_width::char_info_at;
 use uucore::display::Quotable;
@@ -231,10 +231,27 @@ fn expand_shortcuts(args: Vec<OsString>) -> Vec<OsString> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    unexpand_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs unexpand like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    unexpand_with(args, &mut *stdin, stdout)
+}
+
+fn unexpand_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches =
         uucore::clap_localization::handle_clap_result(uu_app(), expand_shortcuts(args.collect()))?;
 
-    unexpand(&Options::new(&matches)?)
+    unexpand(&Options::new(&matches)?, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -284,12 +301,12 @@ pub fn uu_app() -> Command {
         )
 }
 
-enum Input {
-    Stdin(Stdin),
+enum Input<'a> {
+    Stdin(&'a mut dyn Read),
     File(File),
 }
 
-impl Read for Input {
+impl Read for Input<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Stdin(s) => s.read(buf),
@@ -298,7 +315,7 @@ impl Read for Input {
     }
 }
 
-fn open(path: &OsString) -> UResult<BufReader<Input>> {
+fn open<'a>(path: &OsString, stdin: &'a mut dyn Read) -> UResult<BufReader<Input<'a>>> {
     // some platforms show different read error
     #[cfg(any(target_os = "wasi", windows))]
     {
@@ -311,7 +328,7 @@ fn open(path: &OsString) -> UResult<BufReader<Input>> {
         }
     }
     if path == "-" {
-        return Ok(BufReader::new(Input::Stdin(stdin())));
+        return Ok(BufReader::new(Input::Stdin(stdin)));
     }
     let f = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
@@ -367,7 +384,7 @@ fn next_tabstop(tab_config: &TabConfig, col: usize) -> Option<usize> {
 }
 
 fn write_tabs(
-    output: &mut BufWriter<Stdout>,
+    output: &mut BufWriter<&mut dyn Write>,
     tab_config: &TabConfig,
     print_state: &mut PrintState,
     amode: bool,
@@ -504,7 +521,7 @@ impl PrintState {
 #[allow(clippy::cognitive_complexity)]
 fn unexpand_buf(
     buf: &[u8],
-    output: &mut BufWriter<Stdout>,
+    output: &mut BufWriter<&mut dyn Write>,
     options: &Options,
     lastcol: usize,
     tab_config: &TabConfig,
@@ -645,12 +662,13 @@ fn unexpand_buf(
 
 fn unexpand_file(
     file: &OsString,
-    output: &mut BufWriter<Stdout>,
+    output: &mut BufWriter<&mut dyn Write>,
     options: &Options,
     lastcol: usize,
     tab_config: &TabConfig,
+    stdin: &mut dyn Read,
 ) -> UResult<()> {
-    let mut input = open(file)?;
+    let mut input = open(file, stdin)?;
     let mut print_state = PrintState {
         col: 0,
         scol: 0,
@@ -676,8 +694,8 @@ fn unexpand_file(
     write_tabs(output, tab_config, &mut print_state, options.aflag)
 }
 
-fn unexpand(options: &Options) -> UResult<()> {
-    let mut output = BufWriter::new(stdout());
+fn unexpand(options: &Options, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
+    let mut output = BufWriter::new(stdout);
     let tab_config = &options.tab_config;
     let lastcol = if tab_config.tabstops.len() > 1
         && tab_config.increment_size.is_none()
@@ -689,7 +707,8 @@ fn unexpand(options: &Options) -> UResult<()> {
     };
 
     for file in &options.files {
-        if let Err(e) = unexpand_file(file, &mut output, options, lastcol, tab_config) {
+        if let Err(e) = unexpand_file(file, &mut output, options, lastcol, tab_config, &mut *stdin)
+        {
             show!(e);
             set_exit_code(1);
         }

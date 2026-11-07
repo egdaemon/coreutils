@@ -5,7 +5,6 @@
 
 // spell-checker:ignore (ToDO) INFTY MULT PSKIP accum aftertab beforetab breakwords fmt's formatline linebreak linebreaking linebreaks linelen maxlength minlength nchars noformat noformatline ostream overlen parasplit plass pmatch poffset posn powf prefixindent punct signum slen sstart tabwidth tlen underlen winfo wlen wordlen wordsplits xanti xprefix
 
-use std::io::BufRead;
 use std::iter::Peekable;
 use std::slice::Iter;
 
@@ -173,11 +172,11 @@ pub struct FileLine {
 /// Iterator that produces a stream of Lines from a file
 pub struct FileLines<'a> {
     opts: &'a FmtOptions,
-    reader: &'a mut FileOrStdReader,
+    reader: &'a mut FileOrStdReader<'a>,
 }
 
 impl FileLines<'_> {
-    fn new<'b>(opts: &'b FmtOptions, reader: &'b mut FileOrStdReader) -> FileLines<'b> {
+    fn new<'b>(opts: &'b FmtOptions, reader: &'b mut FileOrStdReader<'b>) -> FileLines<'b> {
         FileLines { opts, reader }
     }
 
@@ -374,7 +373,10 @@ pub struct ParagraphStream<'a> {
 }
 
 impl ParagraphStream<'_> {
-    pub fn new<'b>(opts: &'b FmtOptions, reader: &'b mut FileOrStdReader) -> ParagraphStream<'b> {
+    pub fn new<'b>(
+        opts: &'b FmtOptions,
+        reader: &'b mut FileOrStdReader<'b>,
+    ) -> ParagraphStream<'b> {
         let lines = FileLines::new(opts, reader).peekable();
         // at the beginning of the file, we might find mail headers
         ParagraphStream {

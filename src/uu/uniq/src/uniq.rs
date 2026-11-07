@@ -11,7 +11,7 @@ use clap::{
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::IntErrorKind;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError};
@@ -679,6 +679,27 @@ fn map_clap_errors(clap_error: Error) -> Box<dyn UError> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    uniq_with(
+        args,
+        Box::new(std::io::stdin()),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// Runs uniq like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn std::io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    uniq_with(args, stdin, stdout)
+}
+
+fn uniq_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn std::io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let (args, skip_fields_old, skip_chars_old) = handle_obsolete(args);
 
     let matches = match uu_app().try_get_matches_from(args) {
@@ -728,8 +749,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     uniq.write_uniq(
-        open_input_file(in_file_name)?,
-        open_output_file(out_file_name)?,
+        open_input_file(in_file_name, stdin)?,
+        open_output_file(out_file_name, stdout)?,
     )
 }
 
@@ -861,26 +882,29 @@ fn get_delimiter(matches: &ArgMatches) -> Delimiters {
 }
 
 // None or "-" means stdin.
-fn open_input_file(in_file_name: Option<&OsStr>) -> UResult<Box<dyn BufRead>> {
+fn open_input_file(
+    in_file_name: Option<&OsStr>,
+    stdin: Box<dyn std::io::Read>,
+) -> UResult<Box<dyn BufRead>> {
     Ok(match in_file_name {
         Some(path) if path != "-" => {
             let in_file = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;
             Box::new(BufReader::with_capacity(OUTPUT_BUFFER_CAPACITY, in_file))
         }
-        _ => Box::new(stdin().lock()),
+        _ => Box::new(BufReader::with_capacity(OUTPUT_BUFFER_CAPACITY, stdin)),
     })
 }
 
 // None or "-" means stdout.
-fn open_output_file(out_file_name: Option<&OsStr>) -> UResult<Box<dyn Write>> {
+fn open_output_file<'a>(
+    out_file_name: Option<&OsStr>,
+    stdout: &'a mut dyn Write,
+) -> UResult<Box<dyn Write + 'a>> {
     Ok(match out_file_name {
         Some(path) if path != "-" => {
             let out_file = File::create(path).map_err_context(|| path.maybe_quote().to_string())?;
             Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, out_file))
         }
-        _ => Box::new(BufWriter::with_capacity(
-            OUTPUT_BUFFER_CAPACITY,
-            stdout().lock(),
-        )),
+        _ => Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, stdout)),
     })
 }

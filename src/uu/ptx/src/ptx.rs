@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::ops::Range;
 use std::path::Path;
 
@@ -90,12 +90,13 @@ impl Default for Config {
 fn read_word_filter_file(
     matches: &clap::ArgMatches,
     option: &str,
+    stdin: &mut dyn Read,
 ) -> std::io::Result<FxHashSet<String>> {
     let filename = matches
         .get_one::<OsString>(option)
         .expect("parsing options failed!");
-    let reader: BufReader<Box<dyn Read>> = BufReader::new(if filename == "-" {
-        Box::new(stdin())
+    let reader: BufReader<Box<dyn Read + '_>> = BufReader::new(if filename == "-" {
+        Box::new(stdin)
     } else {
         let file = File::open(Path::new(filename))?;
         Box::new(file)
@@ -111,12 +112,13 @@ fn read_word_filter_file(
 fn read_char_filter_file(
     matches: &clap::ArgMatches,
     option: &str,
+    stdin: &mut dyn Read,
 ) -> std::io::Result<FxHashSet<char>> {
     let filename = matches
         .get_one::<OsString>(option)
         .expect("parsing options failed!");
-    let mut reader: Box<dyn Read> = if filename == "-" {
-        Box::new(stdin())
+    let mut reader: Box<dyn Read + '_> = if filename == "-" {
+        Box::new(stdin)
     } else {
         let file = File::open(Path::new(filename))?;
         Box::new(file)
@@ -137,16 +139,16 @@ struct WordFilter {
 
 impl WordFilter {
     #[allow(clippy::cognitive_complexity)]
-    fn new(matches: &clap::ArgMatches, config: &Config) -> UResult<Self> {
+    fn new(matches: &clap::ArgMatches, config: &Config, stdin: &mut dyn Read) -> UResult<Self> {
         let (o, oset): (bool, FxHashSet<String>) = if matches.contains_id(options::ONLY_FILE) {
-            let words =
-                read_word_filter_file(matches, options::ONLY_FILE).map_err_context(String::new)?;
+            let words = read_word_filter_file(matches, options::ONLY_FILE, &mut *stdin)
+                .map_err_context(String::new)?;
             (true, words)
         } else {
             (false, FxHashSet::default())
         };
         let (i, iset): (bool, FxHashSet<String>) = if matches.contains_id(options::IGNORE_FILE) {
-            let words = read_word_filter_file(matches, options::IGNORE_FILE)
+            let words = read_word_filter_file(matches, options::IGNORE_FILE, &mut *stdin)
                 .map_err_context(String::new)?;
             (true, words)
         } else {
@@ -155,8 +157,8 @@ impl WordFilter {
         let break_set: Option<FxHashSet<char>> = if matches.contains_id(options::BREAK_FILE)
             && !matches.contains_id(options::WORD_REGEXP)
         {
-            let mut chars =
-                read_char_filter_file(matches, options::BREAK_FILE).map_err_context(String::new)?;
+            let mut chars = read_char_filter_file(matches, options::BREAK_FILE, &mut *stdin)
+                .map_err_context(String::new)?;
             if !config.gnu_ext {
                 // GNU off means at least these are considered
                 chars.extend([' ', '\t', '\n']);
@@ -277,7 +279,7 @@ struct FileContent {
 
 type FileMap = Vec<(OsString, FileContent)>;
 
-fn read_input(input_files: &[OsString], config: &Config) -> UResult<FileMap> {
+fn read_input(input_files: &[OsString], config: &Config, stdin: &mut dyn Read) -> UResult<FileMap> {
     let mut file_map: FileMap = FileMap::new();
 
     let sentence_splitter = config
@@ -286,8 +288,8 @@ fn read_input(input_files: &[OsString], config: &Config) -> UResult<FileMap> {
         .and_then(|re_str| Regex::new(re_str).ok());
 
     for filename in input_files {
-        let mut reader: BufReader<Box<dyn Read>> = BufReader::new(if filename == "-" {
-            Box::new(stdin())
+        let mut reader: BufReader<Box<dyn Read + '_>> = BufReader::new(if filename == "-" {
+            Box::new(&mut *stdin)
         } else {
             // Attach the quoted filename to the error context if opening fails
             let file =
@@ -790,10 +792,11 @@ fn write_traditional_output(
     file_map: &FileMap,
     words: &BTreeSet<WordRef>,
     output_filename: &OsStr,
+    stdout: &mut dyn Write,
 ) -> UResult<()> {
-    let mut writer: BufWriter<Box<dyn Write>> =
+    let mut writer: BufWriter<Box<dyn Write + '_>> =
         BufWriter::new(if output_filename == OsStr::new("-") {
-            Box::new(stdout())
+            Box::new(stdout)
         } else {
             let file = File::create(output_filename)
                 .map_err_context(|| output_filename.quote().to_string())?;
@@ -910,6 +913,19 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    ptx_with(args, &mut std::io::stdin(), &mut std::io::stdout().lock())
+}
+
+/// Runs ptx like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    ptx_with(args, &mut *stdin, stdout)
+}
+
+fn ptx_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let mut matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     let mut config = get_config(&mut matches)?;
 
@@ -942,10 +958,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     }
 
-    let word_filter = WordFilter::new(&matches, &config)?;
-    let file_map = read_input(&input_files, &config)?;
+    let word_filter = WordFilter::new(&matches, &config, &mut *stdin)?;
+    let file_map = read_input(&input_files, &config, &mut *stdin)?;
     let word_set = create_word_set(&config, &word_filter, &file_map);
-    write_traditional_output(&mut config, &file_map, &word_set, &output_file)
+    write_traditional_output(&mut config, &file_map, &word_set, &output_file, stdout)
 }
 
 pub fn uu_app() -> Command {

@@ -123,10 +123,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs dircolors like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: &mut dyn std::io::Read,
+    mut stdin: Box<dyn std::io::Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    dircolors_with(args, stdin, stdout)
+    dircolors_with(args, &mut *stdin, stdout)
 }
 
 fn dircolors_with(

@@ -62,7 +62,7 @@ fn parse(args: impl uucore::Args) -> UResult<Options> {
 /// Runs tee like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: &mut dyn Read,
+    mut stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     const BUF_SIZE: usize = 32 * 1024;

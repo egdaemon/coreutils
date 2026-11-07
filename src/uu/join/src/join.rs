@@ -8,13 +8,15 @@
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use memchr::{Memchr3, memchr_iter, memmem::Finder};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Split, Stdin, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, BufWriter, Split, Write};
 use std::num::IntErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+use std::rc::Rc;
 use uucore::diagnostics::OptionValue;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError, UUsageError, set_exit_code};
@@ -433,17 +435,27 @@ struct State<'a> {
     has_unpaired: bool,
 }
 
+/// stdin, shared by the inputs that name it.
+#[derive(Clone)]
+struct SharedStdin(Rc<RefCell<Box<dyn io::Read>>>);
+
+impl io::Read for SharedStdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.borrow_mut().read(buf)
+    }
+}
+
 impl<'a> State<'a> {
     fn new(
         file_num: FileNum,
         name: &'a OsString,
-        stdin: &'a Stdin,
+        stdin: &SharedStdin,
         key: usize,
         line_ending: LineEnding,
         print_unpaired: bool,
     ) -> UResult<Self> {
         let file_buf = if name == "-" {
-            Box::new(stdin.lock()) as Box<dyn BufRead>
+            Box::new(BufReader::new(stdin.clone())) as Box<dyn BufRead>
         } else {
             let file = File::open(name).map_err_context(|| format!("{}", name.maybe_quote()))?;
             Box::new(BufReader::new(file)) as Box<dyn BufRead>
@@ -868,6 +880,23 @@ fn parse_settings(matches: &clap::ArgMatches, diag_args: Option<&[OsString]>) ->
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    join_with(args, Box::new(io::stdin()), &mut io::stdout().lock())
+}
+
+/// Runs join like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    join_with(args, stdin, stdout)
+}
+
+fn join_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     // The command line is kept for the caret in `-o` diagnostics, which needs
     // the list as typed.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
@@ -916,7 +945,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let sep = settings.separator.clone();
     match sep {
-        SepSetting::Byte(byte) => exec(file1, file2, settings, OneByteSep { byte: [byte] }),
+        SepSetting::Byte(byte) => exec(
+            file1,
+            file2,
+            settings,
+            OneByteSep { byte: [byte] },
+            stdin,
+            stdout,
+        ),
         SepSetting::Char(c) => exec(
             file1,
             file2,
@@ -924,9 +960,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             MultiByteSep {
                 finder: Finder::new(&c),
             },
+            stdin,
+            stdout,
         ),
-        SepSetting::Whitespaces => exec(file1, file2, settings, WhitespaceSep {}),
-        SepSetting::Line => exec(file1, file2, settings, LineSep {}),
+        SepSetting::Whitespaces => exec(file1, file2, settings, WhitespaceSep {}, stdin, stdout),
+        SepSetting::Line => exec(file1, file2, settings, LineSep {}, stdin, stdout),
     }
 }
 
@@ -1066,8 +1104,10 @@ fn exec<Sep: Separator>(
     file2: &OsString,
     settings: Settings,
     sep: Sep,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
 ) -> UResult<()> {
-    let stdin = stdin();
+    let stdin = SharedStdin(Rc::new(RefCell::new(stdin)));
 
     let mut state1 = State::new(
         FileNum::File1,
@@ -1117,8 +1157,7 @@ fn exec<Sep: Separator>(
 
     let repr = Repr::new(settings.line_ending, sep, format, &settings.empty);
 
-    let stdout = stdout();
-    let mut writer = BufWriter::new(stdout.lock());
+    let mut writer = BufWriter::new(stdout);
 
     if settings.headers {
         state1.write_headers(&mut writer, &state2, &repr)?;

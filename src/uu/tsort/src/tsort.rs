@@ -31,6 +31,23 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    tsort_with(args, &mut io::stdin(), &mut io::stdout().lock())
+}
+
+/// Runs tsort like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn io::Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    tsort_with(args, &mut *stdin, stdout)
+}
+
+fn tsort_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn io::Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let mut inputs = matches
@@ -54,7 +71,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let mut g = Graph::new(input.to_string_lossy().to_string());
 
     if input == "-" {
-        process_input(io::stdin().lock(), &mut g)?;
+        process_input(BufReader::new(stdin), &mut g)?;
     } else {
         let mut options: OpenOptions;
         // Windows and WASI do not report a directory as a read error.
@@ -102,7 +119,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         process_input(reader, &mut g)?;
     }
 
-    g.run_tsort()?;
+    g.run_tsort(stdout)?;
     Ok(())
 }
 
@@ -256,7 +273,7 @@ impl Graph {
     }
 
     /// Implementation of algorithm T from TAOCP (Don. Knuth), vol. 1.
-    fn run_tsort(&mut self) -> Result<(), Error> {
+    fn run_tsort(&mut self, stdout: &mut dyn Write) -> Result<(), Error> {
         let mut independent_nodes_queue: VecDeque<Sym> = self
             .nodes
             .iter()
@@ -274,7 +291,7 @@ impl Graph {
             .make_contiguous()
             .sort_unstable_by(|a, b| self.get_node_name(*a).cmp(self.get_node_name(*b)));
 
-        let mut out = BufWriter::new(io::stdout().lock());
+        let mut out = BufWriter::new(stdout);
 
         while !self.nodes.is_empty() {
             let v = self.find_next_node(&mut independent_nodes_queue);

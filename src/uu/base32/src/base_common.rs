@@ -144,6 +144,11 @@ pub fn base_app(about: String, usage: String) -> Command {
 }
 
 pub fn get_input(config: &Config) -> UResult<Box<dyn BufRead>> {
+    get_input_from(config, Box::new(io::stdin()))
+}
+
+/// Like [`get_input`], reading `stdin` instead of the process's standard input.
+pub fn get_input_from(config: &Config, stdin: Box<dyn io::Read>) -> UResult<Box<dyn BufRead>> {
     match &config.to_read {
         Some(path_buf) => {
             let file =
@@ -154,20 +159,27 @@ pub fn get_input(config: &Config) -> UResult<Box<dyn BufRead>> {
         }
         None => {
             // Stdin is already buffered by the OS; wrap once more to reduce syscalls per read.
-            Ok(Box::new(BufReader::with_capacity(
-                DEFAULT_BUF_SIZE,
-                io::stdin(),
-            )))
+            Ok(Box::new(BufReader::with_capacity(DEFAULT_BUF_SIZE, stdin)))
         }
     }
 }
 pub fn handle_input<R: BufRead>(input: &mut R, format: Format, config: Config) -> UResult<()> {
+    handle_input_to(input, format, config, &mut io::stdout().lock())
+}
+
+/// Like [`handle_input`], writing to `stdout` instead of the process's standard output.
+pub fn handle_input_to<R: BufRead>(
+    input: &mut R,
+    format: Format,
+    config: Config,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     // Always allow padding for Base64 to avoid a full pre-scan of the input.
     let supports_fast_decode_and_encode =
         get_supports_fast_decode_and_encode(format, config.decode, true);
 
     let supports_fast_decode_and_encode_ref = supports_fast_decode_and_encode.as_ref();
-    let mut stdout_lock = io::stdout().lock();
+    let mut stdout_lock = stdout;
     let result = match (format, config.decode) {
         // Base58 must process the entire input as one big integer; keep the
         // historical behavior of buffering everything for this format only.

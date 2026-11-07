@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write, stdin, stdout};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use uucore::display::{OsWrite, Quotable};
 use uucore::error::{UResult, USimpleError, strip_errno};
@@ -70,9 +70,9 @@ fn sysv_sum(mut reader: impl Read) -> std::io::Result<(usize, u16)> {
     Ok((blocks_read, ret as u16))
 }
 
-fn open(name: &OsString) -> UResult<Reader> {
+fn open<'a>(name: &OsString, stdin: &'a mut dyn Read) -> UResult<Reader<'a>> {
     if name == "-" {
-        Ok(Reader::Stdin(stdin()))
+        Ok(Reader::Stdin(stdin))
     } else {
         let path = Path::new(name);
         // some platforms cannot catch those errors when open or read. needs additional cost
@@ -117,6 +117,19 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    sum_with(args, &mut std::io::stdin(), &mut std::io::stdout().lock())
+}
+
+/// Runs sum like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    sum_with(args, &mut *stdin, stdout)
+}
+
+fn sum_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let files: Vec<OsString> = match matches.get_many::<OsString>(options::FILE) {
@@ -130,7 +143,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let width = if sysv { 1 } else { 5 };
 
     for file in &files {
-        let reader = match open(file) {
+        let reader = match open(file, &mut *stdin) {
             Ok(f) => f,
             Err(error) => {
                 show!(error);
@@ -152,7 +165,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 continue;
             }
         };
-        let mut stdout = stdout().lock();
         if print_names {
             write!(stdout, "{sum:0width$} {blocks:width$} ")?;
             stdout.write_all_os(file)?;
@@ -198,12 +210,12 @@ pub fn uu_app() -> Command {
         )
 }
 
-enum Reader {
-    Stdin(std::io::Stdin),
+enum Reader<'a> {
+    Stdin(&'a mut dyn Read),
     File(File),
 }
 
-impl Read for Reader {
+impl Read for Reader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Stdin(s) => s.read(buf),

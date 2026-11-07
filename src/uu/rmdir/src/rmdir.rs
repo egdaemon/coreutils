@@ -31,7 +31,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs rmdir like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    _stdin: &mut dyn io::Read,
+    _stdin: Box<dyn io::Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     rmdir_with(args, stdout)

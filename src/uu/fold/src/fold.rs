@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::num::IntErrorKind;
 use std::path::Path;
 use unicode_width::UnicodeWidthChar;
@@ -53,6 +53,19 @@ struct FoldContext<'a, W: Write> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    fold_with(args, &mut std::io::stdin(), &mut std::io::stdout().lock())
+}
+
+/// Runs fold like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    fold_with(args, &mut *stdin, stdout)
+}
+
+fn fold_with(args: impl uucore::Args, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
     let args = handle_obsolete(&args.collect::<Vec<_>>());
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
@@ -91,7 +104,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         None => vec![OsString::from("-")],
     };
 
-    fold(&files, bytes, characters, spaces, width)
+    fold(&files, bytes, characters, spaces, width, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -223,15 +236,15 @@ fn fold(
     characters: bool,
     spaces: bool,
     width: usize,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
 ) -> UResult<()> {
-    let mut output = BufWriter::new(stdout());
+    let mut output = BufWriter::new(stdout);
 
     for filename in filenames {
-        let mut stdin_buf;
         let mut file_buf;
         let buffer = BufReader::new(if filename == "-" {
-            stdin_buf = stdin();
-            &mut stdin_buf as &mut dyn Read
+            &mut *stdin as &mut dyn Read
         } else {
             // Like GNU, report the error but keep processing the remaining files.
             match File::open(Path::new(filename)) {

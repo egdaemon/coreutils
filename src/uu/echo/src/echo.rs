@@ -127,7 +127,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Runs echo like [`uumain`], isolated from the process's standard streams. echo reads no input.
 pub fn uumain_with(
     args: impl uucore::Args,
-    _stdin: &mut dyn Read,
+    _stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     echo(args, stdout)

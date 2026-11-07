@@ -12,7 +12,7 @@ use memchr::memmem;
 #[cfg(not(target_os = "wasi"))]
 use memmap2::Mmap;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufWriter, Read, Write, stdin, stdout};
+use std::io::{BufWriter, Read, Write};
 use std::{fs::File, path::Path};
 #[cfg(all(unix, not(target_os = "fuchsia")))]
 use uucore::error::UError;
@@ -34,6 +34,23 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    tac_with(args, None, &mut std::io::stdout().lock())
+}
+
+/// Runs tac like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    tac_with(args, Some(&mut *stdin), stdout)
+}
+
+fn tac_with(
+    args: impl uucore::Args,
+    stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let before = matches.get_flag(options::BEFORE);
@@ -53,7 +70,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .unwrap()
         .cloned()
         .collect();
-    tac(&files, before, regex, separator)
+    tac(&files, before, regex, separator, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -119,9 +136,9 @@ fn buffer_tac_regex(
     data: &[u8],
     pattern: &regex::bytes::Regex,
     before: bool,
+    stdout: &mut dyn Write,
 ) -> std::io::Result<()> {
-    let out = stdout();
-    let mut out = BufWriter::new(out.lock());
+    let mut out = BufWriter::new(stdout);
 
     // The index of the line separator for the current line.
     //
@@ -189,9 +206,13 @@ fn buffer_tac_regex(
 /// If `before` is `true`, then this function assumes that the
 /// `separator` appears at the beginning of each line, as in
 /// `"/abc/def"`.
-fn buffer_tac(data: &[u8], before: bool, separator: &OsStr) -> std::io::Result<()> {
-    let out = stdout();
-    let mut out = BufWriter::new(out.lock());
+fn buffer_tac(
+    data: &[u8],
+    before: bool,
+    separator: &OsStr,
+    stdout: &mut dyn Write,
+) -> std::io::Result<()> {
+    let mut out = BufWriter::new(stdout);
 
     // The number of bytes in the line separator.
     let slen = separator.len();
@@ -323,7 +344,14 @@ fn translate_regex_flavor(bytes: &[u8]) -> String {
 }
 
 #[allow(clippy::cognitive_complexity)]
-fn tac(filenames: &[OsString], before: bool, regex: bool, separator: &OsStr) -> UResult<()> {
+fn tac(
+    filenames: &[OsString],
+    before: bool,
+    regex: bool,
+    separator: &OsStr,
+    mut stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     // Compile the regular expression pattern if it is provided.
     let maybe_pattern = if regex {
         match regex::bytes::RegexBuilder::new(&translate_regex_flavor(separator.as_encoded_bytes()))
@@ -358,7 +386,7 @@ fn tac(filenames: &[OsString], before: bool, regex: bool, separator: &OsStr) -> 
             // why mapping the temp file is sound). Mapping the raw stdin fd
             // would expose `tac < file` to the same truncation SIGBUS as #9748,
             // and the temp file also bounds memory for huge stdin (#10094).
-            match buffer_stdin() {
+            match buffer_stdin(stdin.as_deref_mut()) {
                 #[cfg(not(target_os = "wasi"))]
                 Ok(StdinData::Mmap(mmap1)) => {
                     mmap = mmap1;
@@ -404,8 +432,8 @@ fn tac(filenames: &[OsString], before: bool, regex: bool, separator: &OsStr) -> 
         // Select the appropriate `tac` algorithm based on whether the
         // separator is given as a regular expression or a fixed string.
         match maybe_pattern {
-            Some(ref pattern) => buffer_tac_regex(data, pattern, before),
-            None => buffer_tac(data, before, separator),
+            Some(ref pattern) => buffer_tac_regex(data, pattern, before, stdout),
+            None => buffer_tac(data, before, separator, stdout),
         }
         .map_err(TacError::WriteError)?;
     }
@@ -420,12 +448,18 @@ enum StdinData {
 
 /// Copy stdin to a temp file, then memory-map it.
 /// Falls back to reading directly into memory if temp file creation fails.
-fn buffer_stdin() -> std::io::Result<StdinData> {
+/// A stdin given by the caller, which has no file descriptor, is read into memory.
+fn buffer_stdin(stdin: Option<&mut (dyn Read + '_)>) -> std::io::Result<StdinData> {
+    if let Some(stdin) = stdin {
+        let mut buf = Vec::new();
+        stdin.read_to_end(&mut buf)?;
+        return Ok(StdinData::Vec(buf));
+    }
     // Try to create a temp file (respects TMPDIR)
     #[cfg(not(target_os = "wasi"))]
     if let Ok(mut tmp) = tempfile::tempfile() {
         // Temp file created - copy stdin to it, then read back
-        uucore::buf_copy::copy_fast(&mut stdin(), &mut tmp)?;
+        uucore::buf_copy::copy_fast(&mut std::io::stdin(), &mut tmp)?;
         // SAFETY: `tmp` is an unlinked file owned by this process, so no other
         // process can open and truncate it. The mapping therefore stays valid
         // for its whole lifetime and cannot trigger SIGBUS (unlike mapping a
@@ -435,7 +469,7 @@ fn buffer_stdin() -> std::io::Result<StdinData> {
     };
     // Fall back to reading directly into memory (e.g., bad TMPDIR)
     let mut buf = Vec::new();
-    stdin().read_to_end(&mut buf)?;
+    std::io::stdin().read_to_end(&mut buf)?;
     Ok(StdinData::Vec(buf))
 }
 
