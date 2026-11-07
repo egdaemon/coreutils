@@ -6,11 +6,12 @@
 // spell-checker:ignore (ToDO) fname, algo, bitlen
 
 use clap::Command;
+use std::io::{Read, Write};
 use uu_checksum_common::{ChecksumCommand, checksum_main, default_checksum_app, options};
 
 use uucore::checksum::compute::{DigestFormat, OutputFormat};
 use uucore::checksum::{
-    AlgoKind, BlakeLength, ChecksumError, HashLength, ReadingMode, parse_blake_length,
+    AlgoKind, BlakeLength, ChecksumError, HashLength, ReadingMode, Streams, parse_blake_length,
     sanitize_sha2_sha3_length_str,
 };
 use uucore::error::UResult;
@@ -82,6 +83,19 @@ fn maybe_sanitize_length(
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    cksum(args, &mut Streams::process())
+}
+
+/// Runs cksum like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    cksum(args, &mut Streams::given(stdin, stdout))
+}
+
+fn cksum(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let algo_cli = matches
@@ -127,7 +141,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         print_cpu_debug_info();
     }
 
-    checksum_main(algo_cli, length, matches, output_format, true)
+    checksum_main(algo_cli, length, matches, output_format, true, streams)
 }
 
 pub fn uu_app() -> Command {

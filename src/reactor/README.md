@@ -9,13 +9,13 @@ which write their output as each chunk of stdin arrives.
 | command   | supported    | reason |
 |-----------|--------------|--------|
 | arch      | yes          |        |
-| b2sum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| b2sum     | yes          |        |
 | base32    | yes          |        |
 | base64    | yes          |        |
 | basename  | yes          |        |
 | basenc    | yes          |        |
 | cat       | yes          |        |
-| cksum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| cksum     | yes          |        |
 | comm      | yes          |        |
 | cp        | no           | interactive prompts read stdin |
 | csplit    | yes          |        |
@@ -38,7 +38,7 @@ which write their output as each chunk of stdin arrives.
 | link      | yes          |        |
 | ln        | yes          | `-i` reads its answers from stdin |
 | ls        | no           | layout and colour depend on the terminal |
-| md5sum    | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| md5sum    | yes          |        |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
 | mv        | no           | interactive prompts read stdin |
@@ -59,11 +59,11 @@ which write their output as each chunk of stdin arrives.
 | rm        | no           | interactive prompts read stdin |
 | rmdir     | yes          |        |
 | seq       | yes          |        |
-| sha1sum   | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha224sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha256sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha384sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha512sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| sha1sum   | yes          |        |
+| sha224sum | yes          |        |
+| sha256sum | yes          |        |
+| sha384sum | yes          |        |
+| sha512sum | yes          |        |
 | shred     | no           | operates on file descriptors directly |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
