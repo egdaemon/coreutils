@@ -66,6 +66,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "comm" => comm,
             "csplit" => csplit,
             "date" => date,
+            "dir" => dir,
             "dircolors" => dircolors,
             "dirname" => dirname,
             "echo" => echo,
@@ -105,6 +106,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "unexpand" => unexpand,
             "uniq" => uniq,
             "unlink" => unlink,
+            "vdir" => vdir,
             "wc" => wc,
         ),
     }
@@ -602,6 +604,40 @@ mod tests {
         let (code, stdout, _) = exec(&["ls", "--color=always", dir.path()], b"");
         assert_eq!(code, 0);
         assert!(stdout.contains(&0x1b));
+    }
+
+    #[cfg(feature = "dir")]
+    #[test]
+    fn dir_lists_in_columns() {
+        let dir = Listing::new("dir");
+        assert_eq!(
+            exec(&["dir", "-w", "80", dir.path()], b""),
+            (0, b"a  b  sub\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "vdir")]
+    #[test]
+    fn vdir_lists_in_long_format() {
+        let dir = Listing::new("vdir");
+        let (code, stdout, stderr) = exec(&["vdir", dir.path()], b"");
+        let stdout = String::from_utf8(stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!((code, stderr), (0, Vec::new()));
+        assert!(lines[0].starts_with("total "), "{stdout}");
+        assert!(
+            lines[1].starts_with('-') && lines[1].ends_with(" a"),
+            "{stdout}"
+        );
+        assert!(
+            lines[2].starts_with('-') && lines[2].ends_with(" b"),
+            "{stdout}"
+        );
+        assert!(
+            lines[3].starts_with('d') && lines[3].ends_with(" sub"),
+            "{stdout}"
+        );
+        assert_eq!(lines.len(), 4, "{stdout}");
     }
 
     #[cfg(feature = "pwd")]

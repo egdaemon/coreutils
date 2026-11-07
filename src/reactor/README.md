@@ -22,7 +22,7 @@ which write their output as each chunk of stdin arrives.
 | cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
 | date      | yes          |        |
 | dd        | no           | operates on file descriptors directly |
-| dir       | no           | layout and colour depend on the terminal |
+| dir       | yes          | columns are 80 wide unless `-w` or `COLUMNS` says otherwise, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | dircolors | yes          |        |
 | dirname   | yes          |        |
 | echo      | yes          |        |
@@ -84,6 +84,6 @@ which write their output as each chunk of stdin arrives.
 | unexpand  | yes          |        |
 | uniq      | yes          |        |
 | unlink    | yes          |        |
-| vdir      | no           | layout and colour depend on the terminal |
+| vdir      | yes          | `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | wc        | yes          |        |
 | yes       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
