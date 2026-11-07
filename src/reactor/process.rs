@@ -58,11 +58,13 @@ pub fn lookup(util: &str) -> Option<Utility> {
         "tee" => Some(Utility::Stream(tee)),
         util => mains!(util,
             "arch" => arch,
+            "b2sum" => b2sum,
             "base32" => base32,
             "base64" => base64,
             "basename" => basename,
             "basenc" => basenc,
             "cat" => cat,
+            "cksum" => cksum,
             "comm" => comm,
             "csplit" => csplit,
             "date" => date,
@@ -78,6 +80,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "hostid" => hostid,
             "join" => join,
             "link" => link,
+            "md5sum" => md5sum,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
             "nl" => nl,
@@ -92,6 +95,11 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "realpath" => realpath,
             "rmdir" => rmdir,
             "seq" => seq,
+            "sha1sum" => sha1sum,
+            "sha224sum" => sha224sum,
+            "sha256sum" => sha256sum,
+            "sha384sum" => sha384sum,
+            "sha512sum" => sha512sum,
             "shuf" => shuf,
             "sleep" => sleep,
             "sum" => sum,
@@ -522,6 +530,151 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "b2sum")]
+    #[test]
+    fn b2sum_digests_stdin() {
+        assert_eq!(
+            exec(&["b2sum"], b"abc"),
+            (0, b"ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923  -\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "md5sum")]
+    #[test]
+    fn md5sum_digests_stdin() {
+        assert_eq!(
+            exec(&["md5sum"], b"abc"),
+            (
+                0,
+                b"900150983cd24fb0d6963f7d28e17f72  -\n".to_vec(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[cfg(feature = "sha1sum")]
+    #[test]
+    fn sha1sum_digests_stdin() {
+        assert_eq!(
+            exec(&["sha1sum"], b"abc"),
+            (
+                0,
+                b"a9993e364706816aba3e25717850c26c9cd0d89d  -\n".to_vec(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[cfg(feature = "sha224sum")]
+    #[test]
+    fn sha224sum_digests_stdin() {
+        assert_eq!(
+            exec(&["sha224sum"], b"abc"),
+            (
+                0,
+                b"23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7  -\n".to_vec(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[cfg(feature = "sha256sum")]
+    #[test]
+    fn sha256sum_digests_stdin() {
+        assert_eq!(
+            exec(&["sha256sum"], b"abc"),
+            (
+                0,
+                b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -\n".to_vec(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[cfg(feature = "sha384sum")]
+    #[test]
+    fn sha384sum_digests_stdin() {
+        assert_eq!(
+            exec(&["sha384sum"], b"abc"),
+            (0, b"cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7  -\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "sha512sum")]
+    #[test]
+    fn sha512sum_digests_stdin() {
+        assert_eq!(
+            exec(&["sha512sum"], b"abc"),
+            (0, b"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f  -\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "cksum")]
+    #[test]
+    fn cksum_checksums_stdin() {
+        assert_eq!(
+            exec(&["cksum"], b"abc"),
+            (0, b"1219131554 3\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "cksum")]
+    #[test]
+    fn cksum_checks_tagged_lines_from_stdin() {
+        let dir = env::temp_dir().join(format!("reactor-cksum-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abc").unwrap();
+
+        let list = format!(
+            "SHA256 ({}) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+            file.display()
+        );
+        let (code, stdout, stderr) = exec(&["cksum", "--check"], list.as_bytes());
+        let expected = format!("{}: OK\n", file.display());
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sha256sum")]
+    #[test]
+    fn sha256sum_checks_a_list_from_stdin() {
+        let dir = env::temp_dir().join(format!("reactor-sha256sum-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abc").unwrap();
+
+        let list = format!(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {}\n",
+            file.display()
+        );
+        let (code, stdout, stderr) = exec(&["sha256sum", "-c"], list.as_bytes());
+        let expected = format!("{}: OK\n", file.display());
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "md5sum")]
+    #[test]
+    fn md5sum_reports_a_mismatch() {
+        let dir = env::temp_dir().join(format!("reactor-md5sum-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abd").unwrap();
+
+        let list = format!("900150983cd24fb0d6963f7d28e17f72  {}\n", file.display());
+        let (code, stdout, _) = exec(&["md5sum", "-c"], list.as_bytes());
+        let expected = format!("{}: FAILED\n", file.display());
+        assert_eq!((code, stdout), (1, expected.into_bytes()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "pwd")]
