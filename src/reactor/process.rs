@@ -73,9 +73,11 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "cat" => cat,
             "cksum" => cksum,
             "comm" => comm,
+            "cp" => cp,
             "csplit" => csplit,
             "cut" => cut,
             "date" => date,
+            "dd" => dd,
             "dir" => dir,
             "dircolors" => dircolors,
             "dirname" => dirname,
@@ -95,6 +97,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "md5sum" => md5sum,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
+            "mv" => mv,
             "nl" => nl,
             "nproc" => nproc,
             "numfmt" => numfmt,
@@ -108,6 +111,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "pwd" => pwd,
             "readlink" => readlink,
             "realpath" => realpath,
+            "rm" => rm,
             "rmdir" => rmdir,
             "seq" => seq,
             "sha1sum" => sha1sum,
@@ -115,6 +119,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "sha256sum" => sha256sum,
             "sha384sum" => sha384sum,
             "sha512sum" => sha512sum,
+            "shred" => shred,
             "shuf" => shuf,
             "sleep" => sleep,
             "sort" => sort,
@@ -588,11 +593,25 @@ mod tests {
         assert!(!stderr.is_empty());
     }
 
-    /// A directory of its own for a test of `util`.
-    fn scratch(util: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("reactor-{util}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory of its own for a test, removed when it drops.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("reactor-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_string()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[cfg(feature = "true")]
@@ -632,8 +651,6 @@ mod tests {
     #[cfg(feature = "tty")]
     #[test]
     fn tty_is_not_a_terminal() {
-        // the reactor sets up the utility's messages before running it.
-        super::super::invocation("tty", &"tty".into()).unwrap();
         assert_eq!(
             exec(&["tty"], b""),
             (1, b"not a tty\n".to_vec(), Vec::new())
@@ -653,22 +670,21 @@ mod tests {
     #[cfg(feature = "touch")]
     #[test]
     fn touch_creates_a_file() {
-        let dir = scratch("touch");
-        let file = dir.join("f");
+        let dir = Scratch::new("touch");
+        let file = dir.0.join("f");
 
         assert_eq!(
             exec(&["touch", file.to_str().unwrap()], b""),
             (0, Vec::new(), Vec::new())
         );
         assert!(file.is_file());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "touch")]
     #[test]
     fn touch_stops_at_stdout() {
-        let dir = scratch("touch-stdout");
-        let (before, after) = (dir.join("before"), dir.join("after"));
+        let dir = Scratch::new("touch-stdout");
+        let (before, after) = (dir.0.join("before"), dir.0.join("after"));
 
         let (code, stdout, stderr) = exec(
             &[
@@ -683,14 +699,13 @@ mod tests {
         assert!(String::from_utf8(stderr).unwrap().contains("'-'"));
         assert!(before.is_file());
         assert!(!after.exists());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "ln")]
     #[test]
     fn ln_reports_the_links_it_makes() {
-        let dir = scratch("ln");
-        let link = dir.join("link");
+        let dir = Scratch::new("ln");
+        let link = dir.0.join("link");
 
         let (code, stdout, stderr) = exec(&["ln", "-sv", "target", link.to_str().unwrap()], b"");
         let expected = format!("'{}' -> 'target'\n", link.display());
@@ -699,14 +714,13 @@ mod tests {
             (0, expected.into_bytes(), Vec::new())
         );
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("target"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "ln")]
     #[test]
     fn ln_asks_stdin_before_replacing() {
-        let dir = scratch("ln-interactive");
-        let link = dir.join("link");
+        let dir = Scratch::new("ln-interactive");
+        let link = dir.0.join("link");
         std::os::unix::fs::symlink("old", &link).unwrap();
         let ln = |answer: &[u8]| exec(&["ln", "-sfi", "new", link.to_str().unwrap()], answer).0;
 
@@ -714,7 +728,6 @@ mod tests {
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("old"));
         assert_eq!(ln(b"y\n"), 0);
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("new"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "nice")]
@@ -738,6 +751,8 @@ mod tests {
         let (code, stdout, stderr) = exec(&["nice", "missing"], b"");
         assert_eq!((code, stdout), (127, Vec::new()));
         assert!(String::from_utf8(stderr).unwrap().contains("'missing'"));
+    }
+
     #[cfg(feature = "cut")]
     #[test]
     fn cut_selects_fields_of_stdin() {
@@ -1139,6 +1154,156 @@ mod tests {
             "{stdout}"
         );
         assert_eq!(lines.len(), 4, "{stdout}");
+    }
+
+    #[cfg(feature = "cp")]
+    #[test]
+    fn cp_reports_each_copy_on_stdout() {
+        let dir = Scratch::new("cp-verbose");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["cp", "-v", &src, &dst], b"");
+        let expected = format!("'{src}' -> '{dst}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"x");
+    }
+
+    #[cfg(feature = "cp")]
+    #[test]
+    fn cp_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("cp-interactive");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        let (code, _, _) = exec(&["cp", "-i", &src, &dst], b"y\n");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+    }
+
+    #[cfg(feature = "mv")]
+    #[test]
+    fn mv_reports_each_rename_on_stdout() {
+        let dir = Scratch::new("mv-verbose");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["mv", "-v", &src, &dst], b"");
+        let expected = format!("renamed '{src}' -> '{dst}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"x");
+    }
+
+    #[cfg(feature = "mv")]
+    #[test]
+    fn mv_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("mv-interactive");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        let (code, _, _) = exec(&["mv", "-i", &src, &dst], b"y\n");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+        assert!(!std::path::Path::new(&src).exists());
+    }
+
+    #[cfg(feature = "rm")]
+    #[test]
+    fn rm_reports_each_removal_on_stdout() {
+        let dir = Scratch::new("rm-verbose");
+        let file = dir.path("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (code, stdout, stderr) = exec(&["rm", "-v", &file], b"");
+        let expected = format!("removed '{file}'\n");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, expected.into_bytes(), Vec::new())
+        );
+        assert!(!std::path::Path::new(&file).exists());
+    }
+
+    #[cfg(feature = "rm")]
+    #[test]
+    fn rm_reads_its_prompt_answer_from_stdin() {
+        let dir = Scratch::new("rm-interactive");
+        let file = dir.path("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (code, _, _) = exec(&["rm", "-i", &file], b"y\n");
+        assert_eq!(code, 0);
+        assert!(!std::path::Path::new(&file).exists());
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_copies_blocks_of_stdin() {
+        let (code, stdout, _) = exec(
+            &[
+                "dd",
+                "bs=2",
+                "skip=1",
+                "count=2",
+                "conv=ucase",
+                "status=none",
+            ],
+            b"abcdefgh",
+        );
+        assert_eq!((code, stdout), (0, b"CDEF".to_vec()));
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_pads_its_stdout_to_seek() {
+        let (code, stdout, _) = exec(&["dd", "bs=1", "seek=2", "status=none"], b"x");
+        assert_eq!((code, stdout), (0, b"\0\0x".to_vec()));
+    }
+
+    #[cfg(feature = "dd")]
+    #[test]
+    fn dd_copies_a_file_to_stdout_and_stdin_to_a_file() {
+        let dir = Scratch::new("dd");
+        let (src, dst) = (dir.path("src"), dir.path("dst"));
+        std::fs::write(&src, b"file").unwrap();
+
+        let (code, stdout, _) = exec(&["dd", &format!("if={src}"), "status=none"], b"");
+        assert_eq!((code, stdout), (0, b"file".to_vec()));
+
+        let (code, stdout, _) = exec(&["dd", &format!("of={dst}"), "status=none"], b"stdin");
+        assert_eq!((code, stdout), (0, Vec::new()));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"stdin");
+    }
+
+    #[cfg(feature = "shred")]
+    #[test]
+    fn shred_overwrites_a_file_with_zeros() {
+        let dir = Scratch::new("shred-zero");
+        let file = dir.path("f");
+        std::fs::write(&file, b"secret").unwrap();
+
+        let (code, stdout, stderr) = exec(&["shred", "-n", "0", "-z", "-x", &file], b"");
+        assert_eq!((code, stdout, stderr), (0, Vec::new(), Vec::new()));
+        assert_eq!(std::fs::read(&file).unwrap(), b"\0\0\0\0\0\0");
+    }
+
+    #[cfg(feature = "shred")]
+    #[test]
+    fn shred_removes_a_file() {
+        let dir = Scratch::new("shred-remove");
+        let file = dir.path("f");
+        std::fs::write(&file, b"secret").unwrap();
+
+        let (code, _, _) = exec(&["shred", "-n", "1", "-u", &file], b"");
+        assert_eq!(code, 0);
+        assert!(!std::path::Path::new(&file).exists());
     }
 
     #[cfg(feature = "pwd")]

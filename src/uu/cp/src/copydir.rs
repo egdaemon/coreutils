@@ -424,7 +424,7 @@ pub(crate) fn copy_directory(
                         //     a/b -> d/a/b
                         //
                         for (x, y) in aligned_ancestors(root, parents_dest) {
-                            println!("{} -> {}", x.display(), y.display());
+                            uucore::outln!("{} -> {}", x.display(), y.display());
                         }
                     }
                     target.join(parent)

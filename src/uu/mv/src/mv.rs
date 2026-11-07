@@ -28,7 +28,7 @@ use rustc_hash::FxHashSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io;
 #[cfg(unix)]
 use std::os::unix;
 #[cfg(unix)]
@@ -171,6 +171,20 @@ static OPT_EXCHANGE: &str = "exchange";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    mv_args(args)
+}
+
+/// Runs mv like [`uumain`], isolated from the process's standard streams. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn io::Write,
+) -> UResult<()> {
+    uucore::io::isolate(stdin, stdout, || mv_args(args))?
+}
+
+fn mv_args(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let files: Vec<OsString> = matches
@@ -464,7 +478,7 @@ fn handle_two_paths(source: &Path, target: &Path, opts: &Options) -> UResult<()>
             OverwriteMode::Force => {}
             OverwriteMode::Default => {
                 let (writable, mode) = is_writable(target);
-                if !writable && io::stdin().is_terminal() {
+                if !writable && uucore::io::stdin_is_terminal() {
                     prompt_overwrite(target, mode)?;
                 }
             }
@@ -680,7 +694,7 @@ fn exchange_two_paths(from: &Path, to: &Path, opts: &Options) -> UResult<()> {
             || translate!("mv-error-cannot-move", "source" => from.quote(), "target" => to.quote()),
         )?;
     if opts.verbose {
-        println!(
+        uucore::outln!(
             "{}",
             translate!("mv-verbose-exchanged", "from" => from.quote(), "to" => to.quote())
         );
@@ -817,7 +831,7 @@ fn rename(
     if to.exists() {
         if opts.update == UpdateMode::None {
             if opts.debug {
-                println!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
+                uucore::outln!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
             }
             return Ok(());
         }
@@ -836,7 +850,7 @@ fn rename(
         match opts.overwrite {
             OverwriteMode::NoClobber => {
                 if opts.debug {
-                    println!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
+                    uucore::outln!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
                 }
                 return Ok(());
             }
@@ -845,7 +859,7 @@ fn rename(
             OverwriteMode::Default => {
                 // GNU mv prompts when stdin is a TTY and target is not writable
                 let (writable, mode) = is_writable(to);
-                if !writable && io::stdin().is_terminal() {
+                if !writable && uucore::io::stdin_is_terminal() {
                     prompt_overwrite(to, mode)?;
                 }
             }
@@ -918,9 +932,9 @@ fn rename(
 
         match display_manager {
             Some(pb) => pb.suspend(|| {
-                println!("{message}");
+                uucore::outln!("{message}");
             }),
-            None => println!("{message}"),
+            None => uucore::outln!("{message}"),
         }
     }
     Ok(())
@@ -1283,9 +1297,9 @@ fn copy_dir_contents_recursive(
                 translate!("mv-verbose-renamed", "from" => from.quote(), "to" => to.quote());
             match display_manager {
                 Some(pb) => pb.suspend(|| {
-                    println!("{message}");
+                    uucore::outln!("{message}");
                 }),
-                None => println!("{message}"),
+                None => uucore::outln!("{message}"),
             }
         }
     };

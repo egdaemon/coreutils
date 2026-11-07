@@ -50,7 +50,6 @@ use std::time::{Duration, Instant};
 use clap::{Arg, Command};
 use num_integer::Integer;
 use uucore::display::Quotable;
-#[cfg(unix)]
 use uucore::error::USimpleError;
 use uucore::error::{FromIo, UResult, set_exit_code};
 use uucore::show_if_err;
@@ -225,6 +224,9 @@ enum Source {
     /// Input from a named pipe, also known as a FIFO.
     #[cfg(unix)]
     Fifo(File),
+
+    /// Input from the stdin of a dd run in isolation, see [`uumain_with`].
+    Isolated(uucore::io::Stdin),
 }
 
 impl Source {
@@ -307,6 +309,16 @@ impl Source {
             Self::File(f) => f.seek(SeekFrom::Current(n.try_into().unwrap())),
             #[cfg(unix)]
             Self::Fifo(f) => uucore::io::read_and_discard(f, n, ibs),
+            Self::Isolated(stdin) => {
+                let m = uucore::io::read_and_discard(stdin, n, ibs)?;
+                if m < n {
+                    show_error!(
+                        "{}",
+                        translate!("dd-error-cannot-skip-offset", "file" => "standard input")
+                    );
+                }
+                Ok(m)
+            }
         }
     }
 
@@ -349,6 +361,7 @@ impl Read for Source {
             Self::StdinFile(f) => f.read(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.read(buf),
+            Self::Isolated(stdin) => stdin.read(buf),
         }
     }
 }
@@ -398,6 +411,22 @@ impl<'a> Input<'a> {
             ));
         }
 
+        if settings.skip > 0 {
+            src.skip(settings.skip, settings.ibs)?;
+        }
+        Ok(Self { src, settings })
+    }
+
+    /// Instantiate this struct with the stdin of a dd run in isolation as a source.
+    fn new_isolated(settings: &'a Settings) -> UResult<Self> {
+        if settings.iflags.directory {
+            return Err(USimpleError::new(
+                1,
+                translate!("dd-error-not-directory", "file" => "standard input"),
+            ));
+        }
+
+        let mut src = Source::Isolated(uucore::io::stdin());
         if settings.skip > 0 {
             src.skip(settings.skip, settings.ibs)?;
         }
@@ -612,12 +641,16 @@ enum Dest {
     /// Output to nothing, dropping each byte written to the output.
     #[cfg(unix)]
     Sink,
+
+    /// Output to the stdout of a dd run in isolation, see [`uumain_with`].
+    Isolated(uucore::io::Stdout),
 }
 
 impl Dest {
     fn fsync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Isolated(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_all()
@@ -635,6 +668,7 @@ impl Dest {
     fn fdatasync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Isolated(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_data()
@@ -653,6 +687,7 @@ impl Dest {
     fn seek(&mut self, n: u64, obs: usize) -> io::Result<u64> {
         match self {
             Self::Stdout(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
+            Self::Isolated(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
             Self::File(f, _) => {
                 #[cfg(unix)]
                 if let Ok(Some(len)) = try_get_len_of_block_device(f)
@@ -802,6 +837,7 @@ impl Write for Dest {
                 }
             }
             Self::Stdout(stdout) => stdout.write(buf),
+            Self::Isolated(stdout) => stdout.write(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.write(buf),
             #[cfg(unix)]
@@ -812,6 +848,7 @@ impl Write for Dest {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Isolated(stdout) => stdout.flush(),
             Self::File(f, _) => f.flush(),
             #[cfg(unix)]
             Self::Fifo(f) => f.flush(),
@@ -840,6 +877,14 @@ impl<'a> Output<'a> {
     fn new_stdout(settings: &'a Settings) -> UResult<Self> {
         let fx = OwnedFileDescriptorOrHandle::from(io::stdout())?;
         let mut dst = Dest::Stdout(fx.into_file());
+        dst.seek(settings.seek, settings.obs)
+            .map_err_context(|| translate!("dd-error-write-error"))?;
+        Ok(Self { dst, settings })
+    }
+
+    /// Instantiate this struct with the stdout of a dd run in isolation as a destination.
+    fn new_isolated(settings: &'a Settings) -> UResult<Self> {
+        let mut dst = Dest::Isolated(uucore::io::stdout());
         dst.seek(settings.seek, settings.obs)
             .map_err_context(|| translate!("dd-error-write-error"))?;
         Ok(Self { dst, settings })
@@ -1603,6 +1648,20 @@ fn is_fifo(filename: &str) -> bool {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    dd(args, false)
+}
+
+/// Runs dd like [`uumain`], isolated from the process's standard streams: without `if=` or `of=`,
+/// it reads `stdin` and writes `stdout`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    uucore::io::isolate(stdin, stdout, || dd(args, true))?
+}
+
+fn dd(args: impl uucore::Args, isolated: bool) -> UResult<()> {
     // The command line is kept for the caret in operand diagnostics.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
         uu_app(),
@@ -1626,12 +1685,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         #[cfg(unix)]
         Some(ref infile) if is_fifo(infile) => Input::new_fifo(Path::new(&infile), &settings)?,
         Some(ref infile) => Input::new_file(Path::new(&infile), &settings)?,
+        None if isolated => Input::new_isolated(&settings)?,
         None => Input::new_stdin(&settings)?,
     };
     let o = match settings.outfile {
         #[cfg(unix)]
         Some(ref outfile) if is_fifo(outfile) => Output::new_fifo(Path::new(&outfile), &settings)?,
         Some(ref outfile) => Output::new_file(Path::new(&outfile), &settings)?,
+        None if isolated => Output::new_isolated(&settings)?,
         None if is_stdout_redirected_to_seekable_file() => Output::new_file_from_stdout(&settings)?,
         None => Output::new_stdout(&settings)?,
     };

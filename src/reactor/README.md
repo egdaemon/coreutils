@@ -17,11 +17,11 @@ which write their output as each chunk of stdin arrives.
 | cat       | yes          |        |
 | cksum     | yes          |        |
 | comm      | yes          |        |
-| cp        | no           | interactive prompts read stdin |
+| cp        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | csplit    | yes          |        |
 | cut       | yes          |        |
 | date      | yes          |        |
-| dd        | no           | operates on file descriptors directly |
+| dd        | yes          | its statistics go to the reactor's stderr |
 | dir       | yes          | columns are 80 wide unless `-w` or `COLUMNS` says otherwise, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | dircolors | yes          |        |
 | dirname   | yes          |        |
@@ -41,7 +41,7 @@ which write their output as each chunk of stdin arrives.
 | md5sum    | yes          |        |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
-| mv        | no           | interactive prompts read stdin |
+| mv        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | nice      | yes          | runs only a command the reactor runs through `uumain_with`, at niceness 0 |
 | nl        | yes          |        |
 | nproc     | yes          |        |
@@ -56,7 +56,7 @@ which write their output as each chunk of stdin arrives.
 | pwd       | yes          |        |
 | readlink  | yes          |        |
 | realpath  | yes          |        |
-| rm        | no           | interactive prompts read stdin |
+| rm        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | rmdir     | yes          |        |
 | seq       | yes          |        |
 | sha1sum   | yes          |        |
@@ -64,7 +64,7 @@ which write their output as each chunk of stdin arrives.
 | sha256sum | yes          |        |
 | sha384sum | yes          |        |
 | sha512sum | yes          |        |
-| shred     | no           | operates on file descriptors directly |
+| shred     | yes          | `-` fails: the caller's stdout is a stream, not a file to overwrite |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
 | sort      | yes          | `--compress-program` fails: there are no other programs; `-c` and `-m` fail on wasi: they read on threads |

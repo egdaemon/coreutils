@@ -492,8 +492,17 @@ pub fn args_os_filtered() -> impl Iterator<Item = OsString> {
 }
 
 /// Read a line from stdin and check whether the first character is `'y'` or `'Y'`
+/// (the isolated stdin of [`io::isolate`] when there is one)
 pub fn read_yes() -> bool {
-    read_yes_from(&mut std::io::stdin().lock())
+    let mut s = String::new();
+    #[cfg(all(feature = "fs", any(unix, windows, target_os = "wasi")))]
+    let isolated = io::read_line_isolated(&mut s);
+    #[cfg(not(all(feature = "fs", any(unix, windows, target_os = "wasi"))))]
+    let isolated = None;
+    isolated
+        .unwrap_or_else(|| std::io::stdin().read_line(&mut s))
+        .is_ok()
+        && matches!(s.chars().next(), Some('y' | 'Y'))
 }
 
 /// Like [`read_yes`], reading the line from `input` instead of stdin.
@@ -670,6 +679,15 @@ macro_rules! prompt_yes(
         uucore::show_if_err!(res);
         uucore::read_yes()
     })
+);
+
+/// Like `println!`, writing to [`io::stdout`]: the process's stdout, or the stdout of a utility run
+/// in isolation (see [`io::isolate`]).
+#[macro_export]
+macro_rules! outln(
+    ($($args:tt)*) => {
+        $crate::io::outln(format_args!($($args)*))
+    }
 );
 
 /// Represent either a character or a byte.
