@@ -18,12 +18,12 @@
 //! module is a single thread: neither call blocks. `execveatwait` advances the utility as far as
 //! its stdio allows and returns [`ERR_PENDING`] until it exits, so the guest runs between polls.
 
-use super::process::{Environment, Process, lookup};
-use super::wasinet::Socket;
+use super::process::{Environment, Stream, Utility, lookup, run};
+use super::wasinet::{Fill, Socket};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::wasi::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -34,17 +34,23 @@ const ERR_PENDING: u32 = 1002;
 
 // bounds the work of a single execveatwait, so the guest runs regularly.
 const BUDGET: usize = 256 * 1024;
-const CHUNK: usize = 32 * 1024;
+// bounds a single read of stdin, so a guest writing quickly can not starve the others.
+const FILL: usize = 16 * 1024;
 
 struct Proc {
-    process: Box<dyn Process>,
+    utility: Utility,
+    argv: Vec<OsString>,
+    // the started stream, of a utility that streams.
+    stream: Option<Box<dyn Stream>>,
     env: Environment,
     // kept open so the guest's connections are accepted.
     listeners: [Socket; 3],
     conns: [Option<Socket>; 3],
+    // stdin read so far, the utility runs once it is exhausted.
+    stdin: Vec<u8>,
+    eof: bool,
     // stdout and stderr, with the offset written so far.
     out: [(Vec<u8>, usize); 2],
-    eof: bool,
     code: Option<i32>,
 }
 
@@ -120,7 +126,7 @@ fn init(id: u64) -> io::Result<Option<Proc>> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let Some(spawn) = lookup(&util) else {
+    let Some(utility) = lookup(&util) else {
         return Ok(None);
     };
 
@@ -144,24 +150,17 @@ fn init(id: u64) -> io::Result<Option<Proc>> {
 
     let listeners = [listen("0")?, listen("1")?, listen("2")?];
 
-    // a utility that fails to start still reports through its stderr, and exits.
-    let mut stderr = Vec::new();
-    let (process, code) = {
-        let _restore = at(&env.cwd, env.enter())?;
-        match spawn(argv, &mut stderr) {
-            Ok(process) => (process, None),
-            Err(code) => (exited(), Some(code)),
-        }
-    };
-
     Ok(Some(Proc {
-        process,
+        utility,
+        argv,
+        stream: None,
         env,
         listeners,
         conns: [None, None, None],
-        out: [(Vec::new(), 0), (stderr, 0)],
+        stdin: Vec::new(),
         eof: false,
-        code,
+        out: [(Vec::new(), 0), (Vec::new(), 0)],
+        code: None,
     }))
 }
 
@@ -188,6 +187,10 @@ pub extern "C" fn execveatwait(id: u64) -> u32 {
 
 /// Advances the process as far as its stdio allows, within the budget. Returns the exit code once
 /// the utility exited and its output was written.
+///
+/// A utility that streams consumes each chunk of stdin as it arrives. Until utilities can suspend,
+/// the others run once their stdin is exhausted, against the stdin read so far, so they never
+/// wait on the guest. Output is buffered and written between steps.
 fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
     let mut moved = 0;
 
@@ -204,7 +207,6 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
         unreachable!("every connection was accepted");
     };
 
-    let mut buf = vec![0u8; CHUNK];
     while moved < BUDGET {
         // output is written before more input is consumed, so a reader that falls behind slows
         // the utility down instead of growing the buffers.
@@ -229,41 +231,46 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
             return Ok(Some(code));
         }
 
-        let input = if proc.process.stdin() && !proc.eof {
-            match stdin.read(&mut buf) {
-                Ok(0) => {
-                    proc.eof = true;
-                    None
-                }
-                Ok(n) => {
-                    moved += n;
-                    Some(&buf[..n])
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-                Err(e) => return Err(e),
+        let [(stdout, _), (stderr, _)] = &mut proc.out;
+        if let (Utility::Stream(spawn), None) = (proc.utility, &proc.stream) {
+            let _restore = proc.env.enter()?;
+            match spawn(std::mem::take(&mut proc.argv), stderr) {
+                Ok(s) => proc.stream = Some(s),
+                Err(code) => proc.code = Some(code),
             }
-        } else {
-            None
-        };
+            continue;
+        }
+
+        if !proc.eof {
+            match stdin.fill(&mut proc.stdin, FILL)? {
+                Fill::Data(n) => moved += n,
+                Fill::Pending => return Ok(None),
+                Fill::Eof => proc.eof = true,
+            }
+            // a stream consumes each chunk as it arrives.
+            if let Some(s) = proc.stream.as_mut()
+                && !proc.stdin.is_empty()
+            {
+                let _restore = proc.env.enter()?;
+                if let Err(code) = s.write(&proc.stdin, stdout) {
+                    proc.code = Some(code);
+                }
+                proc.stdin.clear();
+            }
+            continue;
+        }
 
         let _restore = proc.env.enter()?;
-        let [(stdout, _), (stderr, _)] = &mut proc.out;
-        proc.code = proc.process.step(input, stdout, stderr);
+        proc.code = Some(match (proc.utility, proc.stream.take()) {
+            (_, Some(s)) => s.finish(),
+            (Utility::Main(main), None) => {
+                let argv = std::mem::take(&mut proc.argv);
+                let input = std::mem::take(&mut proc.stdin);
+                run(main, argv, &mut input.as_slice(), stdout, stderr)
+            }
+            (Utility::Stream(_), None) => unreachable!("a stream is started before stdin is read"),
+        });
     }
 
     Ok(None)
-}
-
-/// The process of a utility that exited before it started.
-fn exited() -> Box<dyn Process> {
-    struct Exited;
-    impl Process for Exited {
-        fn stdin(&self) -> bool {
-            false
-        }
-        fn step(&mut self, _: Option<&[u8]>, _: &mut Vec<u8>, _: &mut Vec<u8>) -> Option<i32> {
-            None
-        }
-    }
-    Box::new(Exited)
 }

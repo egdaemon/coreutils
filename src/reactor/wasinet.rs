@@ -148,6 +148,41 @@ impl Socket {
     }
 }
 
+/// The outcome of [`Socket::fill`].
+pub enum Fill {
+    /// Bytes were read, more may follow.
+    Data(usize),
+    /// Nothing was read, the peer has not written more yet.
+    Pending,
+    /// The peer closed its end, nothing more will be read.
+    Eof,
+}
+
+impl Socket {
+    /// Appends what the peer has written to `buf`, without blocking: it reads until the socket
+    /// would block, `limit` bytes were read, or the peer closed its end.
+    pub fn fill(&mut self, buf: &mut Vec<u8>, limit: usize) -> io::Result<Fill> {
+        let start = buf.len();
+        while buf.len() - start < limit {
+            let offset = buf.len();
+            buf.resize(start + limit, 0);
+            let r = self.read(&mut buf[offset..]);
+            buf.truncate(offset + *r.as_ref().unwrap_or(&0));
+            match r {
+                Ok(0) if buf.len() == start => return Ok(Fill::Eof),
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && buf.len() == start => {
+                    return Ok(Fill::Pending);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Fill::Data(buf.len() - start))
+    }
+}
+
 impl Read for Socket {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let iov = Iovec::new(buf.as_mut_ptr(), buf.len());

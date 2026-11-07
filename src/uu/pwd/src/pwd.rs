@@ -6,7 +6,7 @@
 use clap::ArgAction;
 use clap::{Arg, Command};
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use uucore::format_usage;
 
@@ -27,14 +27,15 @@ fn physical_path() -> io::Result<PathBuf> {
 
     // On Unix, getcwd() must return the physical path:
     // https://pubs.opengroup.org/onlinepubs/9699919799/functions/getcwd.html
-    #[cfg(unix)]
+    // WASI's getcwd() returns the absolute path libc tracks, and WASI has no canonicalize.
+    #[cfg(any(unix, target_os = "wasi"))]
     {
         Ok(path)
     }
 
     // On Windows we have to resolve it.
     // On other systems we also resolve it, just in case.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, target_os = "wasi")))]
     {
         path.canonicalize()
     }
@@ -115,8 +116,12 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     pwd(args, println_verbatim)
 }
 
-/// Runs pwd like [`uumain`], writing to `stdout` instead of the process's standard output.
-pub fn uumain_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
+/// Runs pwd like [`uumain`], isolated from the process's standard streams. pwd reads no input.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     pwd(args, |cwd| {
         stdout.write_all(cwd.as_os_str().as_encoded_bytes())?;
         stdout.write_all(b"\n")

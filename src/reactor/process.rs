@@ -5,55 +5,89 @@
 
 //! Utilities the reactor runs as processes (see `execveat`).
 //!
-//! A process advances a step at a time: each step consumes a chunk of stdin and writes what it
-//! produced to the stdout/stderr buffers, so the reactor never blocks on the utility and can keep
-//! several in flight. A process only exists for utilities with an entry point that can be driven
-//! this way, `uumain` runs to completion on the standard streams.
+//! Every utility is run through its `uumain_with`, which takes the command's stdin and stdout
+//! instead of the process's standard streams, so commands stay isolated from each other.
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use uucore::error::{UError, UResult};
 
-pub trait Process {
-    /// Whether the utility reads stdin, the reactor only reads it for those that do.
-    fn stdin(&self) -> bool;
+/// The `uumain_with` of a utility.
+pub type UUMain = fn(std::vec::IntoIter<OsString>, &mut dyn Read, &mut dyn Write) -> UResult<()>;
 
-    /// Consumes a chunk of stdin, `None` once it is exhausted or for utilities without stdin.
-    /// Returns the exit code once the utility is done.
-    fn step(
-        &mut self,
-        input: Option<&[u8]>,
-        stdout: &mut Vec<u8>,
-        stderr: &mut Vec<u8>,
-    ) -> Option<i32>;
+/// A utility that consumes its stdin a chunk at a time as it arrives, so its output streams.
+pub trait Stream {
+    /// Consumes a chunk of stdin, an error is the utility's exit code.
+    fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> Result<(), i32>;
+    /// The exit code once stdin is exhausted.
+    fn finish(self: Box<Self>) -> i32;
 }
 
-/// Starts the utility from its argv, a utility that fails to start returns its exit code.
-pub type Spawn = fn(Vec<OsString>, &mut Vec<u8>) -> Result<Box<dyn Process>, i32>;
+/// Starts a [`Stream`] from its argv, a utility that fails to start reports to stderr and
+/// returns its exit code.
+pub type Spawn = fn(Vec<OsString>, &mut dyn Write) -> Result<Box<dyn Stream>, i32>;
+
+/// How the reactor runs a utility. A utility with a stream entry point is streamed, the others
+/// run through their `uumain_with` once stdin is exhausted.
+#[derive(Clone, Copy)]
+pub enum Utility {
+    Main(UUMain),
+    #[allow(dead_code)] // unused when no streaming utility is enabled
+    Stream(Spawn),
+}
 
 /// The utilities available as processes.
-pub fn lookup(util: &str) -> Option<Spawn> {
+pub fn lookup(util: &str) -> Option<Utility> {
     match util {
         #[cfg(feature = "echo")]
-        "echo" => Some(spawn_echo),
+        "echo" => Some(Utility::Main(::echo::uumain_with)),
         #[cfg(feature = "tee")]
-        "tee" => Some(spawn_tee),
+        "tee" => Some(Utility::Stream(tee)),
         #[cfg(feature = "pwd")]
-        "pwd" => Some(|argv, _| {
-            Ok(Batch::new(argv, false, |args, _, stdout| {
-                ::pwd::uumain_with(args, stdout)
-            }))
-        }),
+        "pwd" => Some(Utility::Main(::pwd::uumain_with)),
         #[cfg(feature = "tr")]
-        "tr" => Some(|argv, _| Ok(Batch::new(argv, true, ::tr::uumain_with))),
+        "tr" => Some(Utility::Main(::tr::uumain_with)),
         _ => None,
     }
 }
 
-/// Reports an error the way `uucore::main` does, returning its exit code.
-fn report(err: &dyn UError, stderr: &mut Vec<u8>) -> i32 {
+#[cfg(feature = "tee")]
+impl Stream for ::tee::Tee {
+    fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> Result<(), i32> {
+        ::tee::Tee::write(self, chunk, stdout).map_err(|()| 1)
+    }
+
+    fn finish(self: Box<Self>) -> i32 {
+        ::tee::Tee::finish(*self)
+    }
+}
+
+#[cfg(feature = "tee")]
+fn tee(argv: Vec<OsString>, stderr: &mut dyn Write) -> Result<Box<dyn Stream>, i32> {
+    match ::tee::Tee::new(argv.into_iter()) {
+        Ok(t) => Ok(Box::new(t)),
+        Err(err) => Err(report(err.as_ref(), stderr)),
+    }
+}
+
+/// Runs a utility to completion, returning its exit code. A failure is reported to stderr the
+/// way `uucore::main` does.
+pub fn run(
+    main: UUMain,
+    argv: Vec<OsString>,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match main(argv.into_iter(), stdin, stdout) {
+        Ok(()) => uucore::error::get_exit_code(),
+        Err(err) => report(err.as_ref(), stderr),
+    }
+}
+
+fn report(err: &dyn UError, stderr: &mut dyn Write) -> i32 {
     let msg = err.to_string();
     if !msg.is_empty() {
         let _ = writeln!(stderr, "{}: {msg}", uucore::util_name());
@@ -66,111 +100,6 @@ fn report(err: &dyn UError, stderr: &mut Vec<u8>) -> i32 {
         );
     }
     err.code()
-}
-
-/// Runs a utility in one step once its stdin is exhausted, for utilities that read all of their input
-/// before they are done. Its stdin is held in memory until then.
-#[allow(dead_code)] // unused when no batch utility is enabled
-struct Batch {
-    argv: Vec<OsString>,
-    // None for utilities without stdin.
-    input: Option<Vec<u8>>,
-    run: Run,
-}
-
-type Run = fn(std::vec::IntoIter<OsString>, &mut dyn BufRead, &mut dyn Write) -> UResult<()>;
-
-#[allow(dead_code)] // unused when no batch utility is enabled
-impl Batch {
-    fn new(argv: Vec<OsString>, stdin: bool, run: Run) -> Box<dyn Process> {
-        Box::new(Self {
-            argv,
-            input: stdin.then(Vec::new),
-            run,
-        })
-    }
-}
-
-impl Process for Batch {
-    fn stdin(&self) -> bool {
-        self.input.is_some()
-    }
-
-    fn step(
-        &mut self,
-        input: Option<&[u8]>,
-        stdout: &mut Vec<u8>,
-        stderr: &mut Vec<u8>,
-    ) -> Option<i32> {
-        if let (Some(buf), Some(chunk)) = (self.input.as_mut(), input) {
-            buf.extend_from_slice(chunk);
-            return None;
-        }
-
-        let argv = std::mem::take(&mut self.argv);
-        let input = self.input.take().unwrap_or_default();
-        Some(
-            match (self.run)(argv.into_iter(), &mut input.as_slice(), stdout) {
-                Ok(()) => uucore::error::get_exit_code(),
-                Err(err) => report(err.as_ref(), stderr),
-            },
-        )
-    }
-}
-
-#[cfg(feature = "echo")]
-struct Echo(Vec<OsString>);
-
-#[cfg(feature = "echo")]
-fn spawn_echo(argv: Vec<OsString>, _: &mut Vec<u8>) -> Result<Box<dyn Process>, i32> {
-    Ok(Box::new(Echo(argv)))
-}
-
-#[cfg(feature = "echo")]
-impl Process for Echo {
-    fn stdin(&self) -> bool {
-        false
-    }
-
-    // the output is bounded by argv, so echo completes in its first step.
-    fn step(
-        &mut self,
-        _: Option<&[u8]>,
-        stdout: &mut Vec<u8>,
-        stderr: &mut Vec<u8>,
-    ) -> Option<i32> {
-        let argv = std::mem::take(&mut self.0);
-        Some(match ::echo::uumain_with(argv.into_iter(), stdout) {
-            Ok(()) => uucore::error::get_exit_code(),
-            Err(err) => report(err.as_ref(), stderr),
-        })
-    }
-}
-
-#[cfg(feature = "tee")]
-struct Tee(Option<::tee::Tee>);
-
-#[cfg(feature = "tee")]
-fn spawn_tee(argv: Vec<OsString>, stderr: &mut Vec<u8>) -> Result<Box<dyn Process>, i32> {
-    match ::tee::Tee::new(argv.into_iter()) {
-        Ok(t) => Ok(Box::new(Tee(Some(t)))),
-        Err(err) => Err(report(err.as_ref(), stderr)),
-    }
-}
-
-#[cfg(feature = "tee")]
-impl Process for Tee {
-    fn stdin(&self) -> bool {
-        true
-    }
-
-    fn step(&mut self, input: Option<&[u8]>, stdout: &mut Vec<u8>, _: &mut Vec<u8>) -> Option<i32> {
-        let t = self.0.as_mut()?;
-        match input {
-            Some(buf) => t.write(buf, stdout).err().map(|()| 1),
-            None => self.0.take().map(::tee::Tee::finish),
-        }
-    }
 }
 
 #[cfg_attr(not(target_os = "wasi"), allow(dead_code))] // used by execveat
@@ -240,18 +169,19 @@ fn chdir(dir: &std::path::Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    fn argv(args: &[&str]) -> Vec<OsString> {
-        args.iter().map(OsString::from).collect()
-    }
-
-    fn run(p: &mut dyn Process, input: &[&[u8]]) -> (i32, Vec<u8>, Vec<u8>) {
+    fn exec(args: &[&str], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
+        let argv = args.iter().map(OsString::from).collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        for chunk in input {
-            if let Some(code) = p.step(Some(chunk), &mut stdout, &mut stderr) {
-                return (code, stdout, stderr);
-            }
-        }
-        let code = p.step(None, &mut stdout, &mut stderr).expect("done at eof");
+        let code = match lookup(args[0]).expect("a process") {
+            Utility::Main(main) => run(main, argv, &mut &stdin[..], &mut stdout, &mut stderr),
+            Utility::Stream(spawn) => match spawn(argv, &mut stderr) {
+                Ok(mut s) => match s.write(stdin, &mut stdout) {
+                    Ok(()) => s.finish(),
+                    Err(code) => code,
+                },
+                Err(code) => code,
+            },
+        };
         (code, stdout, stderr)
     }
 
@@ -263,52 +193,61 @@ mod tests {
     #[cfg(feature = "echo")]
     #[test]
     fn echo_writes_its_arguments() {
-        let mut p =
-            lookup("echo").unwrap()(argv(&["echo", "-n", "a", "b"]), &mut Vec::new()).unwrap();
-        assert!(!p.stdin());
-        assert_eq!(run(p.as_mut(), &[]), (0, b"a b".to_vec(), Vec::new()));
+        assert_eq!(
+            exec(&["echo", "-n", "a", "b"], b""),
+            (0, b"a b".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "echo")]
     #[test]
     fn echo_interprets_escapes() {
-        let mut p =
-            lookup("echo").unwrap()(argv(&["echo", "-e", r"a\tb"]), &mut Vec::new()).unwrap();
-        assert_eq!(run(p.as_mut(), &[]), (0, b"a\tb\n".to_vec(), Vec::new()));
+        assert_eq!(
+            exec(&["echo", "-e", r"a\tb"], b""),
+            (0, b"a\tb\n".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "tee")]
     #[test]
-    fn tee_copies_each_chunk_to_stdout_and_files() {
+    fn tee_copies_stdin_to_stdout_and_files() {
         let dir = env::temp_dir().join(format!("reactor-tee-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("out");
 
-        let mut p = lookup("tee").unwrap()(
-            vec!["tee".into(), file.clone().into_os_string()],
-            &mut Vec::new(),
-        )
-        .unwrap();
-        assert!(p.stdin());
-
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        assert_eq!(p.step(Some(b"ab"), &mut stdout, &mut stderr), None);
-        // the output of a chunk is available before the input is exhausted.
-        assert_eq!(stdout, b"ab");
-        assert_eq!(p.step(Some(b"c"), &mut stdout, &mut stderr), None);
-        assert_eq!(p.step(None, &mut stdout, &mut stderr), Some(0));
-        assert_eq!(stdout, b"abc");
+        let (code, stdout, stderr) = exec(&["tee", file.to_str().unwrap()], b"abc");
+        assert_eq!((code, stdout, stderr), (0, b"abc".to_vec(), Vec::new()));
         assert_eq!(std::fs::read(&file).unwrap(), b"abc");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(feature = "tee")]
+    #[test]
+    fn tee_streams_each_chunk_before_stdin_is_exhausted() {
+        let Some(Utility::Stream(spawn)) = lookup("tee") else {
+            panic!("tee streams");
+        };
+        let mut s = spawn(vec!["tee".into()], &mut Vec::new()).unwrap();
+        let mut stdout = Vec::new();
+        s.write(b"ab", &mut stdout).unwrap();
+        assert_eq!(stdout, b"ab");
+        s.write(b"c", &mut stdout).unwrap();
+        assert_eq!((s.finish(), stdout), (0, b"abc".to_vec()));
+    }
+
+    #[cfg(feature = "tee")]
+    #[test]
+    fn tee_rejects_unknown_options() {
+        let (code, stdout, _) = exec(&["tee", "--bogus"], b"abc");
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+    }
+
     #[cfg(feature = "tr")]
     #[test]
-    fn tr_translates_its_input_once_exhausted() {
-        let mut p = lookup("tr").unwrap()(argv(&["tr", "a-z", "A-Z"]), &mut Vec::new()).unwrap();
-        assert!(p.stdin());
+    fn tr_translates_its_input() {
         assert_eq!(
-            run(p.as_mut(), &[b"hel", b"lo\n"]),
+            exec(&["tr", "a-z", "A-Z"], b"hello\n"),
             (0, b"HELLO\n".to_vec(), Vec::new())
         );
     }
@@ -316,8 +255,7 @@ mod tests {
     #[cfg(feature = "tr")]
     #[test]
     fn tr_reports_a_missing_operand() {
-        let mut p = lookup("tr").unwrap()(argv(&["tr"]), &mut Vec::new()).unwrap();
-        let (code, stdout, stderr) = run(p.as_mut(), &[]);
+        let (code, stdout, stderr) = exec(&["tr"], b"");
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
@@ -326,24 +264,11 @@ mod tests {
     #[cfg(feature = "pwd")]
     #[test]
     fn pwd_writes_the_working_directory() {
-        let mut p = lookup("pwd").unwrap()(argv(&["pwd", "-P"]), &mut Vec::new()).unwrap();
-        assert!(!p.stdin());
         let mut expected = env::current_dir()
             .unwrap()
             .into_os_string()
             .into_encoded_bytes();
         expected.push(b'\n');
-        assert_eq!(run(p.as_mut(), &[]), (0, expected, Vec::new()));
-    }
-
-    #[cfg(feature = "tee")]
-    #[test]
-    fn tee_rejects_unknown_options() {
-        let mut stderr = Vec::new();
-        let code = match lookup("tee").unwrap()(argv(&["tee", "--bogus"]), &mut stderr) {
-            Ok(_) => panic!("expected tee to fail to start"),
-            Err(code) => code,
-        };
-        assert_eq!(code, 1);
+        assert_eq!(exec(&["pwd", "-P"], b""), (0, expected, Vec::new()));
     }
 }

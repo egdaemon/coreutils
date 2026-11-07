@@ -7,7 +7,7 @@ use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{Write, stdout};
+use std::io::{Read, Write, stdout};
 use uucore::error::UResult;
 use uucore::format::{EscapeSet, FormatChar, OctalParsing, parse_escape_only};
 use uucore::{crate_version, format_usage, os_str_as_bytes};
@@ -121,11 +121,19 @@ fn filter_flags(args: impl Iterator<Item = OsString>) -> (impl Iterator<Item = O
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    uumain_with(args, &mut stdout().lock())
+    echo(args, &mut stdout().lock())
 }
 
-/// Runs echo like [`uumain`], writing to `stdout` instead of the process's standard output.
-pub fn uumain_with(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
+/// Runs echo like [`uumain`], isolated from the process's standard streams. echo reads no input.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    echo(args, stdout)
+}
+
+fn echo(args: impl uucore::Args, stdout: &mut dyn Write) -> UResult<()> {
     // args[0] is the name of the binary.
     let mut args = args.skip(1).peekable();
 

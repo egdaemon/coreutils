@@ -15,7 +15,7 @@ use operation::{
 };
 use simd::process_input;
 use std::ffi::OsString;
-use std::io::{BufRead, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, Read, Write, stdin, stdout};
 use uucore::display::Quotable;
 use uucore::error::{UResult, USimpleError, UUsageError};
 use uucore::fs::is_stdin_directory;
@@ -54,14 +54,15 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     })
 }
 
-/// Runs tr like [`uumain`], reading `stdin` and writing to `stdout` instead of the process's
-/// standard streams.
+/// Runs tr like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: &mut dyn BufRead,
+    stdin: &mut dyn Read,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    tr(args, &mut &mut *stdin, &mut &mut *stdout, || false)
+    tr(args, &mut BufReader::new(stdin), &mut &mut *stdout, || {
+        false
+    })
 }
 
 fn tr<R: BufRead, W: Write>(

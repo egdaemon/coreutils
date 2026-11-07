@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::{self, Error, ErrorKind, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use uucore::display::Quotable;
 use uucore::error::{UResult, strip_errno};
@@ -59,7 +59,38 @@ fn parse(args: impl uucore::Args) -> UResult<Options> {
     })
 }
 
-/// Tee driven a chunk of input at a time, for callers that own the standard streams.
+/// Runs tee like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    const BUF_SIZE: usize = 32 * 1024;
+    let mut tee = Tee::new(args)?;
+    let mut buf = vec![0u8; BUF_SIZE];
+    loop {
+        match stdin.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => tee.write(&buf[..n], stdout).map_err(|()| 1)?,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => {
+                show_error!(
+                    "{}",
+                    translate!("tee-error-stdin", "error" => strip_errno(&e))
+                );
+                return Err(1.into());
+            }
+        }
+    }
+
+    match tee.finish() {
+        0 => Ok(()),
+        code => Err(code.into()),
+    }
+}
+
+/// Tee driven a chunk of input at a time, writing to a stdout the caller owns, for callers that
+/// stream its input as it arrives.
 pub struct Tee {
     output: MultiWriter,
     all_open_succeed: bool,
@@ -355,7 +386,7 @@ fn process_error(
 
 enum Writer {
     File(std::fs::File),
-    // stands in for a writer owned by the caller of Tee, when reporting its errors
+    // stands in for the stdout of Tee, when reporting its errors
     Discard,
     // remove buffering for posix requirement and improve throughput
     #[cfg(any(unix, target_os = "wasi"))]
@@ -392,7 +423,9 @@ impl rustix::fd::AsFd for NamedWriter {
     fn as_fd(&self) -> rustix::fd::BorrowedFd<'_> {
         match &self.inner {
             Writer::File(f) => f.as_fd(),
-            Writer::Discard => unreachable!("only Tee creates it, outside of the splice path"),
+            Writer::Discard => {
+                unreachable!("only Tee creates it, outside of the splice path")
+            }
             Writer::Stdout(s) => s.0,
         }
     }
