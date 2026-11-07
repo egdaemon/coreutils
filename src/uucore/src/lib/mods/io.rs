@@ -158,6 +158,18 @@ impl<'a> Streams<'a> {
         }
     }
 
+    /// Takes stdin as an owned reader. The process's stdin can be taken again and continues where
+    /// the last reader stopped; a caller's is read only once, and leaves an empty stdin behind.
+    pub fn take_stdin(&mut self) -> Box<dyn io::Read> {
+        match self {
+            Self::Process(_) => Box::new(io::stdin()),
+            Self::Given { stdin, .. } => Box::new(std::mem::replace(
+                stdin,
+                io::BufReader::new(Box::new(io::empty())),
+            )),
+        }
+    }
+
     /// Whether stdin is a terminal. A caller's stdin never is.
     pub fn stdin_is_terminal(&self) -> bool {
         use io::IsTerminal;
