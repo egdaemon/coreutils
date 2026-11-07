@@ -40,7 +40,7 @@ const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 pub fn ext_sort(
     files: &mut impl Iterator<Item = UResult<Box<dyn Read + Send>>>,
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
     tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     let (sorted_sender, sorted_receiver) = std::sync::mpsc::sync_channel(1);
@@ -105,7 +105,7 @@ fn reader_writer<
     settings: &GlobalSettings,
     receiver: &Receiver<Chunk>,
     sender: SyncSender<Chunk>,
-    output: Output,
+    output: Output<'_>,
     tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     let separator = settings.line_ending.into();

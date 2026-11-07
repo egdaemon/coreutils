@@ -97,6 +97,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "seq" => seq,
             "shuf" => shuf,
             "sleep" => sleep,
+            "sort" => sort,
             "sum" => sum,
             "tac" => tac,
             "tail" => tail,
@@ -597,6 +598,43 @@ mod tests {
             (0, b"   y   z\n".to_vec(), Vec::new())
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_sorts_stdin() {
+        assert_eq!(
+            exec(&["sort", "-n"], b"10\n9\n100\n"),
+            (0, b"9\n10\n100\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_reads_stdin_once_among_files() {
+        let dir = env::temp_dir().join(format!("reactor-sort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"b\nd\n").unwrap();
+
+        let (code, stdout, stderr) = exec(
+            &["sort", "-u", file.to_str().unwrap(), "-", "-"],
+            b"c\na\nb\n",
+        );
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"a\nb\nc\nd\n".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sort")]
+    #[test]
+    fn sort_refuses_a_compress_program() {
+        let (code, stdout, stderr) = exec(&["sort", "--compress-program=gzip"], b"b\na\n");
+        assert_eq!(code, 2);
+        assert!(stdout.is_empty());
+        assert!(!stderr.is_empty());
     }
 
     #[cfg(feature = "pwd")]

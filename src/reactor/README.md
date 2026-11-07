@@ -67,7 +67,7 @@ which write their output as each chunk of stdin arrives.
 | shred     | no           | operates on file descriptors directly |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
-| sort      | no           | `--compress-program` runs another program |
+| sort      | yes          | `--compress-program` fails: there are no other programs; `-c` and `-m` fail on wasi: they read on threads |
 | split     | no           | `--filter` runs another program |
 | sum       | yes          |        |
 | tac       | yes          |        |
