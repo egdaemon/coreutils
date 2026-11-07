@@ -37,7 +37,7 @@ which write their output as each chunk of stdin arrives.
 | join      | yes          |        |
 | link      | yes          |        |
 | ln        | no           | not ported yet |
-| ls        | no           | layout and colour depend on the terminal |
+| ls        | yes          | one entry per line by default, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal; `-C` and `-x` are 80 columns wide unless `-w` or `COLUMNS` says otherwise |
 | md5sum    | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |

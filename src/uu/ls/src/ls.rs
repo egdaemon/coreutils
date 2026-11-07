@@ -22,7 +22,7 @@ use std::{
     cell::OnceCell,
     ffi::{OsStr, OsString},
     fs::{self, DirEntry, FileType, Metadata, ReadDir},
-    io::{BufWriter, ErrorKind, Stdout, Write, stdout},
+    io::{BufWriter, ErrorKind, Read, Write, stdout},
     ops::RangeInclusive,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -48,7 +48,7 @@ mod dired;
 mod display;
 
 pub mod output;
-pub use config::{Config, options};
+pub use config::{Config, ProgramMode, options};
 pub use display::Format;
 pub use output::{EntryInfo, LsOutput, StreamMode, StreamingOutput};
 
@@ -115,6 +115,20 @@ impl UError for LsError {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    ls(args, None)
+}
+
+/// Runs ls like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    ls(args, Some(stdout))
+}
+
+/// Lists to `stdout`, or to the process's standard output without one.
+fn ls(args: impl uucore::Args, stdout: Option<&mut dyn Write>) -> UResult<()> {
     // The arguments are kept for the caret in SIZE diagnostics, which echoes
     // the command line.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
@@ -125,13 +139,18 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     uucore::i18n::collator::init_locale_collation();
 
-    let config = Config::from(&matches, diag_args.as_deref())?;
-
     let locs = matches
         .get_many::<OsString>(options::PATHS)
         .map_or_else(|| vec![Path::new(".")], |v| v.map(Path::new).collect());
 
-    list(locs, &config)
+    match stdout {
+        None => list(locs, &Config::from(&matches, diag_args.as_deref())?),
+        Some(stdout) => list_to(
+            locs,
+            &Config::isolated(&matches, diag_args.as_deref(), ProgramMode::Ls)?,
+            stdout,
+        ),
+    }
 }
 
 pub fn uu_app() -> Command {
@@ -1004,10 +1023,13 @@ impl Colorable for PathData<'_> {
     }
 }
 
+/// The buffered stdout a listing writes to.
+pub(crate) type Out<'a> = BufWriter<Box<dyn Write + 'a>>;
+
 // A struct to encapsulate state that is passed around from `list` functions.
 #[cfg_attr(not(unix), allow(dead_code))]
 struct ListState<'a> {
-    out: BufWriter<Stdout>,
+    out: Out<'a>,
     style_manager: Option<StyleManager<'a>>,
     // TODO: More benchmarking with different use cases is required here.
     // From experiments, BTreeMap may be faster than HashMap, especially as the
@@ -1037,9 +1059,18 @@ pub struct TextOutput<'a> {
 
 impl<'a> TextOutput<'a> {
     pub fn new(config: &'a Config) -> Self {
+        Self::writing_to(config, Box::new(stdout()))
+    }
+
+    /// Like [`Self::new`], writing to `stdout` instead of the process's standard output.
+    pub fn with_stdout(config: &'a Config, stdout: &'a mut dyn Write) -> Self {
+        Self::writing_to(config, Box::new(stdout))
+    }
+
+    fn writing_to(config: &'a Config, out: Box<dyn Write + 'a>) -> Self {
         Self {
             state: ListState {
-                out: BufWriter::new(stdout()),
+                out: BufWriter::new(out),
                 style_manager: config.color.as_ref().map(StyleManager::new),
                 #[cfg(unix)]
                 uid_cache: FxHashMap::default(),
@@ -1529,6 +1560,12 @@ fn enter_directory<O: LsOutput>(
 /// It uses [`list_with_output`] internally with a text formatter.
 pub fn list(locs: Vec<&Path>, config: &Config) -> UResult<()> {
     let mut output = TextOutput::new(config);
+    list_with_output(locs, config, &mut output)
+}
+
+/// Like [`list`], writing to `stdout` instead of the process's standard output.
+pub fn list_to(locs: Vec<&Path>, config: &Config, stdout: &mut dyn Write) -> UResult<()> {
+    let mut output = TextOutput::with_stdout(config, stdout);
     list_with_output(locs, config, &mut output)
 }
 

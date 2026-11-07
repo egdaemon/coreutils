@@ -78,6 +78,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "hostid" => hostid,
             "join" => join,
             "link" => link,
+            "ls" => ls,
             "mkdir" => mkdir,
             "mktemp" => mktemp,
             "nl" => nl,
@@ -225,9 +226,17 @@ fn chdir(dir: &std::path::Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Runs a utility as `execveatwait` does, after preparing uucore for it like `Environment::enter`.
+    /// The invocation is global to uucore and the reactor runs one utility at a time, so the tests
+    /// run them one at a time too.
     fn exec(args: &[&str], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
-        let argv = args.iter().map(OsString::from).collect();
+        static EXEC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _exec = EXEC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        super::super::invocation(args[0], &argv[0]).expect("an invocation");
         let code = match lookup(args[0]).expect("a process") {
             Utility::Main(main) => run(
                 main,
@@ -249,7 +258,7 @@ mod tests {
 
     #[test]
     fn unknown_utility_is_not_a_process() {
-        assert!(lookup("ls").is_none());
+        assert!(lookup("bogus").is_none());
     }
 
     #[cfg(feature = "echo")]
@@ -522,6 +531,77 @@ mod tests {
         assert_eq!(code, 1);
         assert!(stdout.is_empty());
         assert!(!stderr.is_empty());
+    }
+
+    /// A directory holding the files `b` and `a` and the directory `sub`, removed on drop.
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    struct Listing(std::path::PathBuf);
+
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    impl Listing {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("reactor-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::write(dir.join("b"), b"").unwrap();
+            std::fs::write(dir.join("a"), b"").unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    #[cfg(any(feature = "ls", feature = "dir", feature = "vdir"))]
+    impl Drop for Listing {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_lists_one_entry_per_line() {
+        let dir = Listing::new("ls");
+        assert_eq!(
+            exec(&["ls", dir.path()], b""),
+            (0, b"a\nb\nsub\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_lists_in_columns_of_the_given_width() {
+        let dir = Listing::new("ls-columns");
+        assert_eq!(
+            exec(&["ls", "-C", "-w", "8", dir.path()], b""),
+            (0, b"a  sub\nb\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_classifies_only_when_asked_to_always() {
+        let dir = Listing::new("ls-classify");
+        assert_eq!(
+            exec(&["ls", "--classify=auto", dir.path()], b""),
+            (0, b"a\nb\nsub\n".to_vec(), Vec::new())
+        );
+        assert_eq!(
+            exec(&["ls", "--classify=always", dir.path()], b""),
+            (0, b"a\nb\nsub/\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "ls")]
+    #[test]
+    fn ls_colours_only_when_asked_to_always() {
+        let dir = Listing::new("ls-color");
+        let (code, stdout, _) = exec(&["ls", "--color=auto", dir.path()], b"");
+        assert_eq!((code, stdout), (0, b"a\nb\nsub\n".to_vec()));
+        let (code, stdout, _) = exec(&["ls", "--color=always", dir.path()], b"");
+        assert_eq!(code, 0);
+        assert!(stdout.contains(&0x1b));
     }
 
     #[cfg(feature = "pwd")]
