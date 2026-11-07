@@ -62,6 +62,7 @@ pub fn lookup(util: &str) -> Option<Utility> {
             "base64" => base64,
             "basename" => basename,
             "basenc" => basenc,
+            "cat" => cat,
             "comm" => comm,
             "csplit" => csplit,
             "date" => date,
@@ -441,6 +442,37 @@ mod tests {
             (0, expected.into_bytes(), Vec::new())
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "cat")]
+    #[test]
+    fn cat_copies_stdin() {
+        assert_eq!(exec(&["cat"], b"a\nb"), (0, b"a\nb".to_vec(), Vec::new()));
+    }
+
+    #[cfg(feature = "cat")]
+    #[test]
+    fn cat_numbers_a_file_and_stdin_in_turn() {
+        let dir = env::temp_dir().join(format!("reactor-cat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"x\n").unwrap();
+
+        let (code, stdout, stderr) = exec(&["cat", "-n", file.to_str().unwrap(), "-"], b"y\tz\r");
+        assert_eq!(
+            (code, stdout, stderr),
+            (0, b"     1\tx\n     2\ty\tz\r".to_vec(), Vec::new())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "cat")]
+    #[test]
+    fn cat_shows_ends_and_tabs() {
+        assert_eq!(
+            exec(&["cat", "-A"], b"a\tb\n"),
+            (0, b"a^Ib$\n".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "pwd")]

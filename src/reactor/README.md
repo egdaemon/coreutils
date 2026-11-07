@@ -14,7 +14,7 @@ which write their output as each chunk of stdin arrives.
 | base64    | yes          |        |
 | basename  | yes          |        |
 | basenc    | yes          |        |
-| cat       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| cat       | yes          |        |
 | cksum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
 | comm      | yes          |        |
 | cp        | no           | interactive prompts read stdin |

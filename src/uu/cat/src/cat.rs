@@ -181,7 +181,7 @@ impl<T> FdReadable for T where T: Read + AsFd {}
 impl<T> FdReadable for T where T: Read {}
 
 /// Represents an open file handle, stream, or other device
-struct InputHandle<R: FdReadable> {
+struct InputHandle<R: Read> {
     reader: R,
     is_interactive: bool,
 }
@@ -219,8 +219,27 @@ mod options {
     pub static IGNORED_U: &str = "ignored-u";
 }
 
+/// The streams cat reads `-` from and writes to: the process's own, or the ones its caller gives.
+enum Streams<'a> {
+    Process,
+    Given(&'a mut dyn Read, &'a mut dyn Write),
+}
+
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    cat(args, &mut Streams::Process)
+}
+
+/// Runs cat like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    cat(args, &mut Streams::Given(&mut *stdin, stdout))
+}
+
+fn cat(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let number_mode = if matches.get_flag(options::NUMBER_NONBLANK) {
@@ -267,7 +286,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         show_tabs,
         squeeze_blank,
     };
-    cat_files(files, &options)
+    cat_files(files, &options, streams)
 }
 
 pub fn uu_app() -> Command {
@@ -365,13 +384,39 @@ fn cat_handle<R: FdReadable>(
     if options.can_print_fast() {
         print_fast(handle)
     } else {
-        print_lines(handle, options, state)
+        print_lines(handle, options, state, &mut io::stdout().lock())
     }
 }
 
-fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -> CatResult<()> {
+/// Like [`cat_handle`], writing to `stdout` instead of the process's standard output.
+fn cat_handle_to<R: Read>(
+    handle: &mut InputHandle<R>,
+    options: &OutputOptions,
+    state: &mut OutputState,
+    stdout: &mut dyn Write,
+) -> CatResult<()> {
+    if options.can_print_fast() {
+        write_unbuffered(&mut handle.reader, stdout)
+    } else {
+        print_lines(handle, options, state, stdout)
+    }
+}
+
+fn cat_path(
+    path: &OsString,
+    options: &OutputOptions,
+    state: &mut OutputState,
+    streams: &mut Streams,
+) -> CatResult<()> {
     match get_input_type(path)? {
         InputType::StdIn => {
+            if let Streams::Given(stdin, stdout) = streams {
+                let mut handle = InputHandle {
+                    reader: &mut **stdin,
+                    is_interactive: false,
+                };
+                return cat_handle_to(&mut handle, options, state, *stdout);
+            }
             // A closed stdin is reopened as /dev/null before `uumain` runs, so
             // reading it would succeed silently instead of failing with EBADF.
             #[cfg(all(unix, not(target_os = "fuchsia")))]
@@ -394,6 +439,13 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {
             let file = File::open(path)?;
+            if let Streams::Given(_, stdout) = streams {
+                let mut handle = InputHandle {
+                    reader: file,
+                    is_interactive: false,
+                };
+                return cat_handle_to(&mut handle, options, state, *stdout);
+            }
             if !is_safe_overwrite(&file, &io::stdout()) {
                 return Err(CatError::OutputIsInput);
             }
@@ -406,7 +458,7 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
     }
 }
 
-fn cat_files<'a, I>(files: I, options: &OutputOptions) -> UResult<()>
+fn cat_files<'a, I>(files: I, options: &OutputOptions, streams: &mut Streams) -> UResult<()>
 where
     I: IntoIterator<Item = &'a OsString>,
 {
@@ -419,7 +471,7 @@ where
     let mut error_messages: Vec<String> = Vec::new();
 
     for path in files {
-        if let Err(err) = cat_path(path, options, &mut state) {
+        if let Err(err) = cat_path(path, options, &mut state, streams) {
             if let CatError::Write(ref io_err) = err {
                 handle_broken_pipe(io_err);
                 error_messages.push(err.to_string());
@@ -429,7 +481,10 @@ where
         }
     }
     if state.skipped_carriage_return {
-        print!("\r");
+        match streams {
+            Streams::Process => print!("\r"),
+            Streams::Given(_, stdout) => stdout.write_all(b"\r")?,
+        }
     }
     if error_messages.is_empty() {
         return Ok(());
@@ -514,9 +569,13 @@ fn print_unbuffered<R: FdReadable>(
     let mut stdout = uucore::io::RawWriter(stdout); // use raw syscall to remove buffering
     #[cfg(not(any(unix, target_os = "wasi")))]
     let mut stdout = stdout.lock();
+    write_unbuffered(&mut handle.reader, &mut stdout)
+}
+
+fn write_unbuffered(reader: &mut impl Read, stdout: &mut (impl Write + ?Sized)) -> CatResult<()> {
     let mut buf = [0; 1024 * 64];
     loop {
-        match handle.reader.read(&mut buf) {
+        match reader.read(&mut buf) {
             Ok(0) => return Ok(()),
             Ok(n) => {
                 stdout.write_all(&buf[..n]).map_err(CatError::Write)?;
@@ -533,14 +592,13 @@ fn print_unbuffered<R: FdReadable>(
 
 /// Outputs file contents to stdout in a line-by-line fashion,
 /// propagating any errors that might occur.
-fn print_lines<R: FdReadable>(
+fn print_lines<R: Read>(
     handle: &mut InputHandle<R>,
     options: &OutputOptions,
     state: &mut OutputState,
+    stdout: &mut (impl Write + ?Sized),
 ) -> CatResult<()> {
     let mut in_buf = [0; 1024 * 31];
-    let stdout = io::stdout();
-    let stdout = stdout.lock();
     // Add a 32K buffer for stdout - this greatly improves performance.
     let mut writer = BufWriter::with_capacity(32 * 1024, stdout);
 
