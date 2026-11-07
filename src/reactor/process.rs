@@ -24,32 +24,46 @@ pub type UUMain = fn(std::vec::IntoIter<OsString>, Box<dyn Read>, &mut dyn Write
 
 /// A utility that consumes its stdin a chunk at a time as it arrives, so its output streams.
 pub trait Stream {
-    /// Consumes a chunk of stdin, an error is the utility's exit code.
+    /// Consumes a chunk of stdin. An error ends the utility with its exit code, which is how a
+    /// utility that needs no more of stdin finishes early.
     fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> Result<(), i32>;
     /// The exit code once stdin is exhausted.
-    fn finish(self: Box<Self>) -> i32;
+    fn finish(self: Box<Self>, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32;
 }
 
 /// Starts a [`Stream`] from its argv, a utility that fails to start reports to stderr and
 /// returns its exit code.
 pub type Spawn = fn(Vec<OsString>, &mut dyn Write) -> Result<Box<dyn Stream>, i32>;
 
-/// How the reactor runs a utility. A utility with a stream entry point is streamed, the others
-/// run through their `uumain_with` once stdin is exhausted.
+/// A utility that writes without reading stdin, a chunk at a time, so its output is only produced
+/// as fast as it is read.
+pub trait Source {
+    /// Writes the next chunk of output. An error ends the utility with its exit code.
+    fn read(&mut self, stdout: &mut dyn Write) -> Result<(), i32>;
+}
+
+/// Starts a [`Source`] from its argv, a utility that fails to start reports to stderr and
+/// returns its exit code.
+pub type Open = fn(Vec<OsString>, &mut dyn Write) -> Result<Box<dyn Source>, i32>;
+
+/// How the reactor runs a utility. A utility with a stream or source entry point is streamed,
+/// the others run through their `uumain_with` once stdin is exhausted.
 #[derive(Clone, Copy)]
 pub enum Utility {
     Main(UUMain),
     #[allow(dead_code)] // unused when no streaming utility is enabled
     Stream(Spawn),
+    #[allow(dead_code)] // unused when no source is enabled
+    Source(Open),
 }
 
-/// The utilities that run through their `uumain_with`, each when its feature is enabled.
+/// The `uumain_with` of the utilities that have one, each when its feature is enabled.
 macro_rules! mains {
     ($util:expr, $($name:literal => $krate:ident),* $(,)?) => {
         match $util {
             $(
                 #[cfg(feature = $name)]
-                $name => Some(Utility::Main(::$krate::uumain_with)),
+                $name => Some(::$krate::uumain_with),
             )*
             _ => None,
         }
@@ -59,89 +73,98 @@ macro_rules! mains {
 /// The utilities available as processes.
 pub fn lookup(util: &str) -> Option<Utility> {
     match util {
+        #[cfg(feature = "head")]
+        "head" => Some(Utility::Stream(head)),
         #[cfg(feature = "nice")]
         "nice" => Some(Utility::Main(nice)),
         #[cfg(feature = "tee")]
         "tee" => Some(Utility::Stream(tee)),
-        util => mains!(util,
-            "arch" => arch,
-            "b2sum" => b2sum,
-            "base32" => base32,
-            "base64" => base64,
-            "basename" => basename,
-            "basenc" => basenc,
-            "cat" => cat,
-            "cksum" => cksum,
-            "comm" => comm,
-            "cp" => cp,
-            "csplit" => csplit,
-            "cut" => cut,
-            "date" => date,
-            "dd" => dd,
-            "dir" => dir,
-            "dircolors" => dircolors,
-            "dirname" => dirname,
-            "echo" => echo,
-            "expand" => expand,
-            "expr" => expr,
-            "factor" => factor,
-            "false" => r#false,
-            "fmt" => fmt,
-            "fold" => fold,
-            "head" => head,
-            "hostid" => hostid,
-            "join" => join,
-            "link" => link,
-            "ln" => ln,
-            "ls" => ls,
-            "md5sum" => md5sum,
-            "mkdir" => mkdir,
-            "mktemp" => mktemp,
-            "mv" => mv,
-            "nl" => nl,
-            "nproc" => nproc,
-            "numfmt" => numfmt,
-            "od" => od,
-            "paste" => paste,
-            "pathchk" => pathchk,
-            "pr" => pr,
-            "printenv" => printenv,
-            "printf" => printf,
-            "ptx" => ptx,
-            "pwd" => pwd,
-            "readlink" => readlink,
-            "realpath" => realpath,
-            "rm" => rm,
-            "rmdir" => rmdir,
-            "seq" => seq,
-            "sha1sum" => sha1sum,
-            "sha224sum" => sha224sum,
-            "sha256sum" => sha256sum,
-            "sha384sum" => sha384sum,
-            "sha512sum" => sha512sum,
-            "shred" => shred,
-            "shuf" => shuf,
-            "sleep" => sleep,
-            "sort" => sort,
-            "split" => split,
-            "sum" => sum,
-            "tac" => tac,
-            "tail" => tail,
-            "test" => uu_test,
-            "touch" => touch,
-            "tr" => tr,
-            "true" => r#true,
-            "truncate" => truncate,
-            "tsort" => tsort,
-            "tty" => tty,
-            "uname" => uname,
-            "unexpand" => unexpand,
-            "uniq" => uniq,
-            "unlink" => unlink,
-            "vdir" => vdir,
-            "wc" => wc,
-        ),
+        #[cfg(feature = "yes")]
+        "yes" => Some(Utility::Source(yes)),
+        util => main(util).map(Utility::Main),
     }
+}
+
+/// The `uumain_with` of a utility, which runs it to completion over the whole of its stdin.
+fn main(util: &str) -> Option<UUMain> {
+    mains!(util,
+        "arch" => arch,
+        "b2sum" => b2sum,
+        "base32" => base32,
+        "base64" => base64,
+        "basename" => basename,
+        "basenc" => basenc,
+        "cat" => cat,
+        "cksum" => cksum,
+        "comm" => comm,
+        "cp" => cp,
+        "csplit" => csplit,
+        "cut" => cut,
+        "date" => date,
+        "dd" => dd,
+        "dir" => dir,
+        "dircolors" => dircolors,
+        "dirname" => dirname,
+        "echo" => echo,
+        "expand" => expand,
+        "expr" => expr,
+        "factor" => factor,
+        "false" => r#false,
+        "fmt" => fmt,
+        "fold" => fold,
+        "head" => head,
+        "hostid" => hostid,
+        "join" => join,
+        "link" => link,
+        "ln" => ln,
+        "ls" => ls,
+        "md5sum" => md5sum,
+        "mkdir" => mkdir,
+        "mktemp" => mktemp,
+        "mv" => mv,
+        "nl" => nl,
+        "nproc" => nproc,
+        "numfmt" => numfmt,
+        "od" => od,
+        "paste" => paste,
+        "pathchk" => pathchk,
+        "pr" => pr,
+        "printenv" => printenv,
+        "printf" => printf,
+        "ptx" => ptx,
+        "pwd" => pwd,
+        "readlink" => readlink,
+        "realpath" => realpath,
+        "rm" => rm,
+        "rmdir" => rmdir,
+        "seq" => seq,
+        "sha1sum" => sha1sum,
+        "sha224sum" => sha224sum,
+        "sha256sum" => sha256sum,
+        "sha384sum" => sha384sum,
+        "sha512sum" => sha512sum,
+        "shred" => shred,
+        "shuf" => shuf,
+        "sleep" => sleep,
+        "sort" => sort,
+        "split" => split,
+        "sum" => sum,
+        "tac" => tac,
+        "tail" => tail,
+        "test" => uu_test,
+        "touch" => touch,
+        "tr" => tr,
+        "true" => r#true,
+        "truncate" => truncate,
+        "tsort" => tsort,
+        "tty" => tty,
+        "uname" => uname,
+        "unexpand" => unexpand,
+        "uniq" => uniq,
+        "unlink" => unlink,
+        "vdir" => vdir,
+        "wc" => wc,
+    )
 }
 
 #[cfg(feature = "tee")]
@@ -150,8 +173,78 @@ impl Stream for ::tee::Tee {
         ::tee::Tee::write(self, chunk, stdout).map_err(|()| 1)
     }
 
-    fn finish(self: Box<Self>) -> i32 {
+    fn finish(self: Box<Self>, _: &mut dyn Write, _: &mut dyn Write) -> i32 {
         ::tee::Tee::finish(*self)
+    }
+}
+
+/// A utility that runs once stdin is exhausted, for a utility that streams only some of its
+/// invocations.
+struct Buffered {
+    main: UUMain,
+    argv: Vec<OsString>,
+    stdin: Vec<u8>,
+}
+
+impl Stream for Buffered {
+    fn write(&mut self, chunk: &[u8], _: &mut dyn Write) -> Result<(), i32> {
+        self.stdin.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+        run(
+            self.main,
+            self.argv,
+            Box::new(io::Cursor::new(self.stdin)),
+            stdout,
+            stderr,
+        )
+    }
+}
+
+#[cfg(feature = "head")]
+impl Stream for ::head::Head {
+    fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> Result<(), i32> {
+        match Self::write(self, chunk, stdout) {
+            Ok(false) => Ok(()),
+            // head took all it wants.
+            Ok(true) => Err(0),
+            Err(_) => Err(1),
+        }
+    }
+
+    fn finish(self: Box<Self>, _: &mut dyn Write, _: &mut dyn Write) -> i32 {
+        0
+    }
+}
+
+/// Streams head when it takes a prefix of stdin, so it finishes without waiting for the rest.
+#[cfg(feature = "head")]
+fn head(argv: Vec<OsString>, stderr: &mut dyn Write) -> Result<Box<dyn Stream>, i32> {
+    match ::head::Head::new(argv.clone().into_iter()) {
+        Ok(Some(h)) => Ok(Box::new(h)),
+        Ok(None) => Ok(Box::new(Buffered {
+            main: ::head::uumain_with,
+            argv,
+            stdin: Vec::new(),
+        })),
+        Err(err) => Err(report(err.as_ref(), stderr)),
+    }
+}
+
+#[cfg(feature = "yes")]
+impl Source for ::yes::Yes {
+    fn read(&mut self, stdout: &mut dyn Write) -> Result<(), i32> {
+        stdout.write_all(self.chunk()).map_err(|_| 1)
+    }
+}
+
+#[cfg(feature = "yes")]
+fn yes(argv: Vec<OsString>, stderr: &mut dyn Write) -> Result<Box<dyn Source>, i32> {
+    match ::yes::Yes::new(argv.into_iter()) {
+        Ok(y) => Ok(Box::new(y)),
+        Err(err) => Err(report(err.as_ref(), stderr)),
     }
 }
 
@@ -179,7 +272,7 @@ fn nice(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let Some(Utility::Main(main)) = lookup(&util) else {
+    let Some(main) = main(&util) else {
         let err = io::Error::from(io::ErrorKind::NotFound)
             .map_err_context(|| argv[0].quote().to_string());
         return Err(USimpleError::new(127, err.to_string()));
@@ -307,11 +400,12 @@ mod tests {
             ),
             Utility::Stream(spawn) => match spawn(argv, &mut stderr) {
                 Ok(mut s) => match s.write(stdin, &mut stdout) {
-                    Ok(()) => s.finish(),
+                    Ok(()) => s.finish(&mut stdout, &mut stderr),
                     Err(code) => code,
                 },
                 Err(code) => code,
             },
+            Utility::Source(_) => panic!("a source never finishes"),
         };
         (code, stdout, stderr)
     }
@@ -363,7 +457,10 @@ mod tests {
         s.write(b"ab", &mut stdout).unwrap();
         assert_eq!(stdout, b"ab");
         s.write(b"c", &mut stdout).unwrap();
-        assert_eq!((s.finish(), stdout), (0, b"abc".to_vec()));
+        assert_eq!(
+            (s.finish(&mut Vec::new(), &mut Vec::new()), stdout),
+            (0, b"abc".to_vec())
+        );
     }
 
     #[cfg(feature = "tee")]
@@ -1304,6 +1401,95 @@ mod tests {
         let (code, _, _) = exec(&["shred", "-n", "1", "-u", &file], b"");
         assert_eq!(code, 0);
         assert!(!std::path::Path::new(&file).exists());
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_finishes_once_it_took_its_lines() {
+        let Some(Utility::Stream(spawn)) = lookup("head") else {
+            panic!("head streams");
+        };
+        let mut s = spawn(
+            vec!["head".into(), "-n".into(), "2".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let mut stdout = Vec::new();
+        assert_eq!(s.write(b"a\nb", &mut stdout), Ok(()));
+        assert_eq!(s.write(b"\nc\n", &mut stdout), Err(0));
+        assert_eq!(stdout, b"a\nb\n");
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_finishes_once_it_took_its_bytes() {
+        let Some(Utility::Stream(spawn)) = lookup("head") else {
+            panic!("head streams");
+        };
+        let mut s = spawn(
+            vec!["head".into(), "-c".into(), "3".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let mut stdout = Vec::new();
+        assert_eq!(s.write(b"ab", &mut stdout), Ok(()));
+        assert_eq!(s.write(b"cd", &mut stdout), Err(0));
+        assert_eq!(stdout, b"abc");
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_takes_no_lines() {
+        assert_eq!(
+            exec(&["head", "-n", "0"], b"a\n"),
+            (0, Vec::new(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "head")]
+    #[test]
+    fn head_reports_a_bad_count_before_it_starts() {
+        let (code, stdout, stderr) = exec(&["head", "-n", "x"], b"");
+        assert_eq!((code, stdout), (1, Vec::new()));
+        assert!(!stderr.is_empty());
+    }
+
+    #[cfg(feature = "yes")]
+    #[test]
+    fn yes_writes_a_bounded_chunk_at_a_time() {
+        let Some(Utility::Source(open)) = lookup("yes") else {
+            panic!("yes is a source");
+        };
+        let mut s = open(vec!["yes".into(), "ab".into()], &mut Vec::new()).unwrap();
+        let mut stdout = Vec::new();
+        s.read(&mut stdout).unwrap();
+        let chunk = stdout.len();
+        assert!(chunk > 0 && chunk <= 64 * 1024, "{chunk}");
+        assert!(stdout.chunks(3).all(|line| line == b"ab\n"));
+
+        s.read(&mut stdout).unwrap();
+        assert_eq!(stdout.len(), 2 * chunk);
+    }
+
+    #[cfg(feature = "yes")]
+    #[test]
+    fn yes_reports_a_bad_option() {
+        let Some(Utility::Source(open)) = lookup("yes") else {
+            panic!("yes is a source");
+        };
+        assert_eq!(
+            open(vec!["yes".into(), "--bogus".into()], &mut Vec::new()).err(),
+            Some(1)
+        );
+    }
+
+    #[cfg(all(feature = "nice", feature = "head"))]
+    #[test]
+    fn nice_runs_a_streaming_utility_to_completion() {
+        assert_eq!(
+            exec(&["nice", "head", "-n", "1"], b"a\nb\n"),
+            (0, b"a\n".to_vec(), Vec::new())
+        );
     }
 
     #[cfg(feature = "pwd")]

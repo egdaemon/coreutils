@@ -18,7 +18,7 @@
 //! module is a single thread: neither call blocks. `execveatwait` advances the utility as far as
 //! its stdio allows and returns [`ERR_PENDING`] until it exits, so the guest runs between polls.
 
-use super::process::{Environment, Stream, Utility, lookup, run};
+use super::process::{Environment, Source, Stream, Utility, lookup, run};
 use super::wasinet::{Fill, Socket};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -36,12 +36,16 @@ const ERR_PENDING: u32 = 1002;
 const BUDGET: usize = 256 * 1024;
 // bounds a single read of stdin, so a guest writing quickly can not starve the others.
 const FILL: usize = 16 * 1024;
+// the exit code of a process its reader left, as if SIGPIPE killed it.
+const EXIT_SIGPIPE: i32 = 128 + 13;
 
 struct Proc {
     utility: Utility,
     argv: Vec<OsString>,
     // the started stream, of a utility that streams.
     stream: Option<Box<dyn Stream>>,
+    // the started source, of a utility that writes without reading stdin.
+    source: Option<Box<dyn Source>>,
     env: Environment,
     // kept open so the guest's connections are accepted.
     listeners: [Socket; 3],
@@ -154,6 +158,7 @@ fn init(id: u64) -> io::Result<Option<Proc>> {
         utility,
         argv,
         stream: None,
+        source: None,
         env,
         listeners,
         conns: [None, None, None],
@@ -188,9 +193,11 @@ pub extern "C" fn execveatwait(id: u64) -> u32 {
 /// Advances the process as far as its stdio allows, within the budget. Returns the exit code once
 /// the utility exited and its output was written.
 ///
-/// A utility that streams consumes each chunk of stdin as it arrives. Until utilities can suspend,
-/// the others run once their stdin is exhausted, against the stdin read so far, so they never
-/// wait on the guest. Output is buffered and written between steps.
+/// A utility that streams consumes each chunk of stdin as it arrives, and a source writes a chunk
+/// at a time without reading stdin. Until utilities can suspend, the others run once their stdin
+/// is exhausted, against the stdin read so far, so they never wait on the guest. Output is
+/// buffered and written between steps, and a process whose reader is gone ends as if SIGPIPE
+/// killed it.
 fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
     let mut moved = 0;
 
@@ -214,12 +221,22 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
             while *offset < out.len() {
                 match conn.write(&out[*offset..]) {
                     // the guest's reader is gone, nothing more will be written.
-                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(0) => return Ok(Some(EXIT_SIGPIPE)),
                     Ok(n) => {
                         *offset += n;
                         moved += n;
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::BrokenPipe
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        return Ok(Some(EXIT_SIGPIPE));
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -237,6 +254,26 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
             match spawn(std::mem::take(&mut proc.argv), stderr) {
                 Ok(s) => proc.stream = Some(s),
                 Err(code) => proc.code = Some(code),
+            }
+            continue;
+        }
+
+        // a source writes its next chunk once the last one was written, so it never outruns its
+        // reader.
+        if let Utility::Source(open) = proc.utility {
+            let _restore = proc.env.enter()?;
+            let source = match proc.source.as_mut() {
+                Some(source) => source,
+                None => match open(std::mem::take(&mut proc.argv), stderr) {
+                    Ok(source) => proc.source.insert(source),
+                    Err(code) => {
+                        proc.code = Some(code);
+                        continue;
+                    }
+                },
+            };
+            if let Err(code) = source.read(stdout) {
+                proc.code = Some(code);
             }
             continue;
         }
@@ -262,13 +299,14 @@ fn advance(proc: &mut Proc) -> io::Result<Option<i32>> {
 
         let _restore = proc.env.enter()?;
         proc.code = Some(match (proc.utility, proc.stream.take()) {
-            (_, Some(s)) => s.finish(),
+            (_, Some(s)) => s.finish(stdout, stderr),
             (Utility::Main(main), None) => {
                 let argv = std::mem::take(&mut proc.argv);
                 let input = std::mem::take(&mut proc.stdin);
                 run(main, argv, Box::new(io::Cursor::new(input)), stdout, stderr)
             }
             (Utility::Stream(_), None) => unreachable!("a stream is started before stdin is read"),
+            (Utility::Source(_), None) => unreachable!("a source never reads stdin"),
         });
     }
 

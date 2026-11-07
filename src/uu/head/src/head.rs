@@ -6,7 +6,7 @@
 // spell-checker:ignore (vars) memrchr
 
 use clap::ArgMatches;
-use memchr::memrchr_iter;
+use memchr::{memchr_iter, memrchr_iter};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -638,6 +638,72 @@ pub fn uumain_with(
 ) -> UResult<()> {
     let options = parse(args)?;
     uu_head(&options, Some(&mut *stdin), stdout)
+}
+
+/// Head driven a chunk of stdin at a time, for callers that stream stdin as it arrives. Only the
+/// first lines or bytes of a lone stdin stream: nothing after them is needed.
+pub struct Head {
+    remaining: u64,
+    // the line separator when head takes lines, none when it takes bytes.
+    separator: Option<u8>,
+}
+
+impl Head {
+    /// Parses the arguments like [`uumain`]. There is no `Head` when they ask for more than a
+    /// prefix of a lone stdin.
+    pub fn new(args: impl uucore::Args) -> UResult<Option<Self>> {
+        let options = parse(args)?;
+        if options.verbose || options.files != ["-"] {
+            return Ok(None);
+        }
+
+        Ok(match options.mode {
+            Mode::FirstBytes(n) => Some(Self {
+                remaining: n,
+                separator: None,
+            }),
+            Mode::FirstLines(n) => Some(Self {
+                remaining: n,
+                separator: Some(options.line_ending.into()),
+            }),
+            Mode::AllButLastBytes(_) | Mode::AllButLastLines(_) => None,
+        })
+    }
+
+    /// Writes the part of `chunk` head takes to `stdout`. Returns true once head has taken all it
+    /// wants, so the rest of stdin can be ignored.
+    pub fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> io::Result<bool> {
+        let take = match self.separator {
+            None => self.bytes(chunk),
+            Some(separator) => self.lines(chunk, separator),
+        };
+
+        stdout
+            .write_all(&chunk[..take])
+            .map_err(wrap_in_stdout_error)?;
+        Ok(self.remaining == 0)
+    }
+
+    /// The length of the prefix of `chunk` holding the bytes head still wants, counting them off.
+    fn bytes(&mut self, chunk: &[u8]) -> usize {
+        let take = usize::try_from(self.remaining).map_or(chunk.len(), |n| n.min(chunk.len()));
+        self.remaining -= take as u64;
+        take
+    }
+
+    /// The length of the prefix of `chunk` holding the lines head still wants, counting them off.
+    fn lines(&mut self, chunk: &[u8], separator: u8) -> usize {
+        if self.remaining == 0 {
+            return 0;
+        }
+        for end in memchr_iter(separator, chunk) {
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                return end + 1;
+            }
+        }
+        chunk.len()
+    }
 }
 
 fn parse(args: impl uucore::Args) -> UResult<HeadOptions> {

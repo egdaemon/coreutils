@@ -3,8 +3,9 @@
 Commands `execveatinit`/`execveatwait` run (see `execveat.rs`), out of the utilities built for wasm
 (`feat_wasm`). A command not listed in `process.rs` returns `ErrNotFound`.
 
-Supported commands run through their `uumain_with` once stdin is exhausted, except those that stream,
-which write their output as each chunk of stdin arrives.
+Supported commands run through their `uumain_with` once stdin is exhausted, except those that stream:
+they write their output as each chunk of stdin arrives, or without stdin, a chunk each time the last
+was read. A command whose reader is gone exits with 141, as if SIGPIPE killed it.
 
 | command   | supported    | reason |
 |-----------|--------------|--------|
@@ -32,7 +33,7 @@ which write their output as each chunk of stdin arrives.
 | false     | yes          |        |
 | fmt       | yes          |        |
 | fold      | yes          |        |
-| head      | yes          |        |
+| head      | yes, streams | `-n N` and `-c N` on stdin stream and finish once they took their prefix; the rest run once stdin is exhausted |
 | hostid    | yes          |        |
 | join      | yes          |        |
 | link      | yes          |        |
@@ -86,4 +87,4 @@ which write their output as each chunk of stdin arrives.
 | unlink    | yes          |        |
 | vdir      | yes          | `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | wc        | yes          |        |
-| yes       | no           | never exits: the reactor buffers a utility's whole output before writing it |
+| yes       | yes, streams | writes a chunk each time the last was read; ends with 141, as from SIGPIPE, once its reader is gone |
