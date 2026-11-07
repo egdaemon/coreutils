@@ -13,6 +13,11 @@ use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use uucore::error::{UError, UResult};
+#[cfg(feature = "nice")]
+use uucore::{
+    display::Quotable,
+    error::{FromIo, USimpleError},
+};
 
 /// The `uumain_with` of a utility.
 pub type UUMain = fn(std::vec::IntoIter<OsString>, Box<dyn Read>, &mut dyn Write) -> UResult<()>;
@@ -54,6 +59,8 @@ macro_rules! mains {
 /// The utilities available as processes.
 pub fn lookup(util: &str) -> Option<Utility> {
     match util {
+        #[cfg(feature = "nice")]
+        "nice" => Some(Utility::Main(nice)),
         #[cfg(feature = "tee")]
         "tee" => Some(Utility::Stream(tee)),
         util => mains!(util,
@@ -133,6 +140,32 @@ fn tee(argv: Vec<OsString>, stderr: &mut dyn Write) -> Result<Box<dyn Stream>, i
         Ok(t) => Ok(Box::new(t)),
         Err(err) => Err(report(err.as_ref(), stderr)),
     }
+}
+
+/// Runs nice's command as another utility of the reactor, at the reactor's niceness: a process
+/// has no niceness of its own to adjust, and the reactor runs no other programs.
+#[cfg(feature = "nice")]
+fn nice(
+    argv: std::vec::IntoIter<OsString>,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let ::nice::Invocation::Run { argv, .. } = ::nice::parse(argv)? else {
+        writeln!(stdout, "0")?;
+        return Ok(());
+    };
+    let util = std::path::Path::new(&argv[0])
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(Utility::Main(main)) = lookup(&util) else {
+        let err = io::Error::from(io::ErrorKind::NotFound)
+            .map_err_context(|| argv[0].quote().to_string());
+        return Err(USimpleError::new(127, err.to_string()));
+    };
+
+    super::invocation(&util, &argv[0]).map_err(|e| USimpleError::new(125, e))?;
+    main(argv.into_iter(), stdin, stdout)
 }
 
 /// Runs a utility to completion, returning its exit code. A failure is reported to stderr the
@@ -658,6 +691,29 @@ mod tests {
         assert_eq!(ln(b"y\n"), 0);
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("new"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "nice")]
+    #[test]
+    fn nice_writes_the_niceness() {
+        assert_eq!(exec(&["nice"], b""), (0, b"0\n".to_vec(), Vec::new()));
+    }
+
+    #[cfg(all(feature = "nice", feature = "seq"))]
+    #[test]
+    fn nice_runs_another_utility() {
+        assert_eq!(
+            exec(&["nice", "-n", "5", "seq", "2"], b""),
+            (0, b"1\n2\n".to_vec(), Vec::new())
+        );
+    }
+
+    #[cfg(feature = "nice")]
+    #[test]
+    fn nice_runs_no_other_programs() {
+        let (code, stdout, stderr) = exec(&["nice", "missing"], b"");
+        assert_eq!((code, stdout), (127, Vec::new()));
+        assert!(String::from_utf8(stderr).unwrap().contains("'missing'"));
     }
 
     #[cfg(feature = "pwd")]

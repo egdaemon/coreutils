@@ -42,7 +42,7 @@ which write their output as each chunk of stdin arrives.
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
 | mv        | no           | interactive prompts read stdin |
-| nice      | no           | runs another program |
+| nice      | yes          | runs only a command the reactor runs through `uumain_with`, at niceness 0 |
 | nl        | yes          |        |
 | nproc     | yes          |        |
 | numfmt    | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
