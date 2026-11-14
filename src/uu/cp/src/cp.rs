@@ -2750,8 +2750,14 @@ fn handle_copy_mode(
                         .map(|()| PerformedAction::Copied);
                 }
                 if ft.is_char_device() || ft.is_block_device() {
-                    return copy_node(dest, source_metadata, options.overwrite, options.debug, streams)
-                        .map(|()| PerformedAction::Copied);
+                    return copy_node(
+                        dest,
+                        source_metadata,
+                        options.overwrite,
+                        options.debug,
+                        streams,
+                    )
+                    .map(|()| PerformedAction::Copied);
                 }
             }
             OpenOptions::new()
@@ -3225,7 +3231,13 @@ fn copy_helper(
             return copy_fifo(dest, options.overwrite, options.debug, streams);
         }
         if ft.is_char_device() || ft.is_block_device() {
-            return copy_node(dest, source_metadata, options.overwrite, options.debug, streams);
+            return copy_node(
+                dest,
+                source_metadata,
+                options.overwrite,
+                options.debug,
+                streams,
+            );
         }
     }
 
