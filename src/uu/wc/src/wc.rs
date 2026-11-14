@@ -25,7 +25,6 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use unicode_width::UnicodeWidthChar;
 use utf8::{BufReadDecoder, BufReadDecoderError};
-use uucore::io::Streams;
 use uucore::{display::Quotable, quoting_style::locale_aware_shell_escape, translate};
 
 use uucore::{
@@ -146,7 +145,7 @@ enum Inputs<'a> {
 }
 
 impl<'a> Inputs<'a> {
-    fn new(matches: &'a ArgMatches, streams: &mut Streams) -> UResult<Self> {
+    fn new(matches: &'a ArgMatches, stdin: &mut Stdin) -> UResult<Self> {
         let arg_files = matches.get_many::<OsString>(ARG_FILES);
         let files0_from = matches.get_one::<OsString>(options::FILES0_FROM);
 
@@ -158,7 +157,7 @@ impl<'a> Inputs<'a> {
                 // of time. Every path within the file will have its length checked to
                 // hopefully better align the output columns.
                 let input = Input::from(path);
-                match input.try_as_files0(streams)? {
+                match input.try_as_files0(stdin)? {
                     Some(paths) => Ok(Self::Paths(paths)),
                     None => Ok(Self::Files0From(input)),
                 }
@@ -174,14 +173,14 @@ impl<'a> Inputs<'a> {
     fn try_iter(
         &'a self,
         settings: &'a Settings<'a>,
-        streams: &mut Streams,
+        stdin: &mut Stdin,
     ) -> UResult<impl Iterator<Item = InputIterItem<'a>> + use<'a>> {
         let base: Box<dyn Iterator<Item = _>> = match self {
             Self::Stdin => Box::new(iter::once(Ok(Input::Stdin(StdinKind::Implicit)))),
             Self::Paths(inputs) => Box::new(inputs.iter().map(|i| Ok(i.as_borrowed()))),
             Self::Files0From(input) => match input {
                 Input::Path(path) => Box::new(files0_iter_file(path)?),
-                Input::Stdin(_) => Box::new(files0_iter_stdin(streams.take_stdin())),
+                Input::Stdin(_) => Box::new(files0_iter_stdin(stdin.take())),
             },
         };
 
@@ -281,7 +280,7 @@ impl<'a> Input<'a> {
     /// a regular file. If given a file less than 10 MiB, it will be consumed and turned into
     /// a Vec of [`Input::Path`] which can be scanned to determine the widths of the columns that
     /// will ultimately be printed.
-    fn try_as_files0(&self, streams: &mut Streams) -> UResult<Option<Vec<Input<'static>>>> {
+    fn try_as_files0(&self, stdin: &mut Stdin) -> UResult<Option<Vec<Input<'static>>>> {
         match self {
             Self::Path(path) => match fs::metadata(path) {
                 Ok(meta) if meta.is_file() && meta.len() <= (10 << 20) => Ok(Some(
@@ -289,12 +288,30 @@ impl<'a> Input<'a> {
                 )),
                 _ => Ok(None),
             },
-            Self::Stdin(_) if matches!(streams, Streams::Process(_)) && is_stdin_small_file() => {
-                Ok(Some(
-                    files0_iter_stdin(streams.take_stdin()).collect::<Result<Vec<_>, _>>()?,
-                ))
-            }
+            Self::Stdin(_) if stdin.is_small_file() => Ok(Some(
+                files0_iter_stdin(stdin.take()).collect::<Result<Vec<_>, _>>()?,
+            )),
             Self::Stdin(_) => Ok(None),
+        }
+    }
+}
+
+/// The stdin wc reads: the process's own, or one its caller gives in its place.
+enum Stdin {
+    Process,
+    Given(Option<Box<dyn Read>>),
+}
+
+impl Stdin {
+    fn is_small_file(&self) -> bool {
+        matches!(self, Self::Process) && is_stdin_small_file()
+    }
+
+    /// Takes stdin to read file names from, a given stdin is read only once.
+    fn take(&mut self) -> Box<dyn Read> {
+        match self {
+            Self::Process => Box::new(io::stdin().lock()),
+            Self::Given(r) => r.take().unwrap_or_else(|| Box::new(io::empty())),
         }
     }
 }
@@ -388,10 +405,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let settings = Settings::new(&matches);
-    let mut streams = Streams::process();
-    let inputs = Inputs::new(&matches, &mut streams)?;
+    let mut stdin = Stdin::Process;
+    let inputs = Inputs::new(&matches, &mut stdin)?;
 
-    wc(&inputs, &settings, &mut streams)
+    wc(&inputs, &settings, &mut stdin, &mut io::stdout().lock())
 }
 
 /// Runs wc like [`uumain`], isolated from the process's standard streams.
@@ -403,10 +420,10 @@ pub fn uumain_with(
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let settings = Settings::new(&matches);
-    let mut streams = Streams::given(stdin, stdout);
-    let inputs = Inputs::new(&matches, &mut streams)?;
+    let mut stdin = Stdin::Given(Some(stdin));
+    let inputs = Inputs::new(&matches, &mut stdin)?;
 
-    wc(&inputs, &settings, &mut streams)
+    wc(&inputs, &settings, &mut stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -728,15 +745,12 @@ enum CountResult {
 ///
 /// Therefore, the reading implementations always return a total and sometimes
 /// return an error: ([`WordCount`], `Option<io::Error>`).
-fn word_count_from_input(
-    input: &Input<'_>,
-    settings: &Settings,
-    streams: &mut Streams,
-) -> CountResult {
+fn word_count_from_input(input: &Input<'_>, settings: &Settings, stdin: &mut Stdin) -> CountResult {
     let (total, maybe_err) = match input {
-        Input::Stdin(_) => match streams {
-            Streams::Process(_) => word_count_from_reader(io::stdin().lock(), settings),
-            Streams::Given { stdin, .. } => word_count_from_buffered(stdin, settings),
+        Input::Stdin(_) => match stdin {
+            Stdin::Process => word_count_from_reader(io::stdin().lock(), settings),
+            Stdin::Given(Some(r)) => word_count_from_buffered(BufReader::new(r), settings),
+            Stdin::Given(None) => word_count_from_buffered(io::empty(), settings),
         },
         Input::Path(path) => match File::open(path) {
             Ok(f) => word_count_from_reader(f, settings),
@@ -935,7 +949,12 @@ pub(crate) fn wc_simd_allowed(policy: &SimdPolicy) -> bool {
     policy.iter_features().any(is_simd_runtime_feature)
 }
 
-fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()> {
+fn wc(
+    inputs: &Inputs,
+    settings: &Settings,
+    stdin: &mut Stdin,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let mut total_word_count = WordCount::default();
     let mut num_inputs: usize = 0;
 
@@ -992,7 +1011,7 @@ fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()
         }
     }
 
-    for maybe_input in inputs.try_iter(settings, streams)? {
+    for maybe_input in inputs.try_iter(settings, stdin)? {
         num_inputs += 1;
 
         let input = match maybe_input {
@@ -1004,7 +1023,7 @@ fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()
         };
 
         // Store any I/O error from reading to print AFTER stats (matches GNU wc behavior)
-        let (word_count, deferred_error) = match word_count_from_input(&input, settings, streams) {
+        let (word_count, deferred_error) = match word_count_from_input(&input, settings, stdin) {
             CountResult::Success(word_count) => (word_count, None),
             CountResult::Interrupted(word_count, err) => (
                 word_count,
@@ -1019,13 +1038,9 @@ fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()
         if are_stats_visible {
             let maybe_title = input.to_title();
             let maybe_title_str = maybe_title.as_deref();
-            if let Err(err) = print_stats(
-                settings,
-                &word_count,
-                maybe_title_str,
-                number_width,
-                streams.stdout(),
-            ) {
+            if let Err(err) =
+                print_stats(settings, &word_count, maybe_title_str, number_width, stdout)
+            {
                 let title = maybe_title_str.unwrap_or(OsStr::new("<stdin>"));
                 show!(err.map_err_context(|| translate!("wc-error-failed-to-print-result", "title" => title.to_string_lossy())));
                 return Ok(());
@@ -1033,7 +1048,7 @@ fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()
         }
         // Print deferred error after stats to match GNU wc output order
         if let Some(err) = deferred_error {
-            let _ = streams.stdout().flush();
+            let _ = stdout.flush();
             show!(err);
         }
     }
@@ -1041,13 +1056,7 @@ fn wc(inputs: &Inputs, settings: &Settings, streams: &mut Streams) -> UResult<()
     if settings.total_when.is_total_row_visible(num_inputs) {
         let wc_total_msg = translate!("wc-total");
         let title = are_stats_visible.then_some(OsStr::new(&wc_total_msg));
-        if let Err(err) = print_stats(
-            settings,
-            &total_word_count,
-            title,
-            number_width,
-            streams.stdout(),
-        ) {
+        if let Err(err) = print_stats(settings, &total_word_count, title, number_width, stdout) {
             show!(err.map_err_context(|| translate!("wc-error-failed-to-print-total")));
         }
     }

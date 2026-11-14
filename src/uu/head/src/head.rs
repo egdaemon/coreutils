@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use uucore::diagnostics::OptionValue;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError, strip_errno};
-use uucore::io::Streams;
 use uucore::line_ending::LineEnding;
 use uucore::parser::parse_signed_num::number_offset;
 use uucore::parser::parse_size::ParseSizeError;
@@ -466,23 +465,27 @@ fn head_reader(input: impl Read, options: &HeadOptions, stdout: &mut dyn Write) 
     }
 }
 
-/// Runs head over its files. With a caller's streams, head reads their stdin in place of the
-/// process's, and copies every file to their stdout through [`head_reader`].
+/// Runs head over its files. Given a `stdin`, head reads it in place of the process's stdin, and
+/// copies every file to `stdout` through [`head_reader`].
 #[allow(clippy::cognitive_complexity)]
-fn uu_head(options: &HeadOptions, streams: &mut Streams) -> UResult<()> {
-    let isolated = matches!(streams, Streams::Given { .. });
+fn uu_head(
+    options: &HeadOptions,
+    mut stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let isolated = stdin.is_some();
     let mut first = true;
     for file in &options.files {
         let res = if file == "-" {
             if (options.files.len() > 1 && !options.quiet) || options.verbose {
                 if !first {
-                    writeln!(streams.stdout())?;
+                    writeln!(stdout)?;
                 }
                 let name = locale_aware_shell_escape(translate!("head-name-stdin"));
-                writeln!(streams.stdout(), "==> {name} <==")?;
+                writeln!(stdout, "==> {name} <==")?;
             }
-            if let Streams::Given { stdin, stdout } = streams {
-                head_reader(stdin, options, *stdout)?;
+            if let Some(stdin) = stdin.as_deref_mut() {
+                head_reader(stdin, options, stdout)?;
                 first = false;
                 continue;
             }
@@ -542,10 +545,10 @@ fn uu_head(options: &HeadOptions, streams: &mut Streams) -> UResult<()> {
             let mut print_header = || -> UResult<()> {
                 if (options.files.len() > 1 && !options.quiet) || options.verbose {
                     if !first {
-                        writeln!(streams.stdout())?;
+                        writeln!(stdout)?;
                     }
                     let name = locale_aware_shell_escape(file);
-                    writeln!(streams.stdout(), "==> {name} <==")?;
+                    writeln!(stdout, "==> {name} <==")?;
                     first = false;
                 }
                 Ok(())
@@ -598,7 +601,7 @@ fn uu_head(options: &HeadOptions, streams: &mut Streams) -> UResult<()> {
                 continue;
             }
             if isolated {
-                head_reader(&mut file_handle, options, streams.stdout())?;
+                head_reader(&mut file_handle, options, stdout)?;
             } else {
                 head_file(&mut file_handle, options)?;
             }
@@ -624,17 +627,17 @@ fn uu_head(options: &HeadOptions, streams: &mut Streams) -> UResult<()> {
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let options = parse(args)?;
-    uu_head(&options, &mut Streams::process())
+    uu_head(&options, None, &mut io::stdout().lock())
 }
 
 /// Runs head like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: Box<dyn Read>,
+    mut stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
     let options = parse(args)?;
-    uu_head(&options, &mut Streams::given(stdin, stdout))
+    uu_head(&options, Some(&mut *stdin), stdout)
 }
 
 /// Head driven a chunk of stdin at a time, for callers that stream stdin as it arrives. Only the

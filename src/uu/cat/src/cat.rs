@@ -19,7 +19,6 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::FileTypeExt;
 use uucore::display::Quotable;
 use uucore::error::{UResult, strip_errno};
-use uucore::io::Streams;
 use uucore::translate;
 use uucore::{fast_inc::fast_inc_one, format_usage};
 
@@ -222,19 +221,25 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    cat(args, &mut Streams::process())
+    cat(args, None, &mut io::stdout().lock())
 }
 
 /// Runs cat like [`uumain`], isolated from the process's standard streams.
 pub fn uumain_with(
     args: impl uucore::Args,
-    stdin: Box<dyn Read>,
+    mut stdin: Box<dyn Read>,
     stdout: &mut dyn Write,
 ) -> UResult<()> {
-    cat(args, &mut Streams::given(stdin, stdout))
+    cat(args, Some(&mut *stdin), stdout)
 }
 
-fn cat(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
+/// Runs cat, reading `-` from `stdin` and writing to `stdout` without the process's fast paths
+/// when a `stdin` is given.
+fn cat(
+    args: impl uucore::Args,
+    stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let number_mode = if matches.get_flag(options::NUMBER_NONBLANK) {
@@ -281,7 +286,7 @@ fn cat(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
         show_tabs,
         squeeze_blank,
     };
-    cat_files(files, &options, streams)
+    cat_files(files, &options, stdin, stdout)
 }
 
 pub fn uu_app() -> Command {
@@ -401,16 +406,17 @@ fn cat_path(
     path: &OsString,
     options: &OutputOptions,
     state: &mut OutputState,
-    streams: &mut Streams,
+    stdin: Option<&mut (dyn Read + '_)>,
+    stdout: &mut dyn Write,
 ) -> CatResult<()> {
     match get_input_type(path)? {
         InputType::StdIn => {
-            if let Streams::Given { stdin, stdout } = streams {
+            if let Some(stdin) = stdin {
                 let mut handle = InputHandle {
                     reader: stdin,
                     is_interactive: false,
                 };
-                return cat_handle_to(&mut handle, options, state, *stdout);
+                return cat_handle_to(&mut handle, options, state, stdout);
             }
             // A closed stdin is reopened as /dev/null before `uumain` runs, so
             // reading it would succeed silently instead of failing with EBADF.
@@ -434,12 +440,12 @@ fn cat_path(
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {
             let file = File::open(path)?;
-            if let Streams::Given { stdout, .. } = streams {
+            if stdin.is_some() {
                 let mut handle = InputHandle {
                     reader: file,
                     is_interactive: false,
                 };
-                return cat_handle_to(&mut handle, options, state, *stdout);
+                return cat_handle_to(&mut handle, options, state, stdout);
             }
             if !is_safe_overwrite(&file, &io::stdout()) {
                 return Err(CatError::OutputIsInput);
@@ -453,7 +459,12 @@ fn cat_path(
     }
 }
 
-fn cat_files<'a, I>(files: I, options: &OutputOptions, streams: &mut Streams) -> UResult<()>
+fn cat_files<'a, I>(
+    files: I,
+    options: &OutputOptions,
+    mut stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()>
 where
     I: IntoIterator<Item = &'a OsString>,
 {
@@ -466,7 +477,7 @@ where
     let mut error_messages: Vec<String> = Vec::new();
 
     for path in files {
-        if let Err(err) = cat_path(path, options, &mut state, streams) {
+        if let Err(err) = cat_path(path, options, &mut state, stdin.as_deref_mut(), stdout) {
             if let CatError::Write(ref io_err) = err {
                 handle_broken_pipe(io_err);
                 error_messages.push(err.to_string());
@@ -476,10 +487,7 @@ where
         }
     }
     if state.skipped_carriage_return {
-        match streams {
-            Streams::Process(_) => print!("\r"),
-            Streams::Given { stdout, .. } => stdout.write_all(b"\r")?,
-        }
+        stdout.write_all(b"\r")?;
     }
     if error_messages.is_empty() {
         return Ok(());
