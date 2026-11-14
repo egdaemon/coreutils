@@ -42,12 +42,13 @@ use uucore::fs::{
     get_filename, is_symlink_loop, normalize_path, path_ends_with_terminator,
     paths_refer_to_same_file, replace_link,
 };
+use uucore::io::Streams;
 use uucore::{backup_control, update_control};
 // These are exposed for projects (e.g. nushell) that want to create an `Options` value, which
 // requires these enum.
 pub use uucore::{backup_control::BackupMode, update_control::UpdateMode};
 use uucore::{
-    format_usage, parser::shortcut_value_parser::ShortcutValueParser, prompt_yes, show_error,
+    format_usage, parser::shortcut_value_parser::ShortcutValueParser, prompt_yes_on, show_error,
     show_warning,
 };
 
@@ -479,13 +480,10 @@ impl Display for SparseDebug {
 /// This function prints the debug information of a file copy operation if
 /// no hard link or symbolic link is required, and data copy is required.
 /// It prints the debug information of the offload, reflink, and sparse detection actions.
-fn show_debug(copy_debug: &CopyDebug) -> io::Result<()> {
-    use std::io::Write;
-
+fn show_debug(copy_debug: &CopyDebug, streams: &mut Streams) -> io::Result<()> {
     let debug_string = translate!("cp-debug-copy-offload", "offload" => copy_debug.offload, "reflink" => copy_debug.reflink, "sparse" => copy_debug.sparse_detection);
 
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+    let stdout = streams.stdout();
 
     stdout.write_all(debug_string.as_bytes())?;
     stdout.flush()?;
@@ -818,6 +816,20 @@ pub fn uu_app() -> Command {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    cp(args, &mut Streams::process())
+}
+
+/// Runs cp like [`uumain`], on the caller's streams instead of the process's. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn io::Write,
+) -> UResult<()> {
+    cp(args, &mut Streams::given(stdin, stdout))
+}
+
+fn cp(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let options = Options::from_matches(&matches)?;
@@ -836,7 +848,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let (sources, target) = parse_path_args(paths, &options)?;
 
-    if let Err(error) = copy(&sources, &target, &options) {
+    if let Err(error) = copy_with(&sources, &target, &options, streams) {
         match error {
             CpError::NotAllFilesCopied => {
                 // non-fatal; exit code still EXIT_ERR
@@ -1455,6 +1467,16 @@ fn show_error_if_needed(error: &CpError) {
 ///
 /// Behavior is determined by the `options` parameter, see [`Options`] for details.
 pub fn copy(sources: &[PathBuf], target: &Path, options: &Options) -> CopyResult<()> {
+    copy_with(sources, target, options, &mut Streams::process())
+}
+
+/// Like [`copy`], prompting on and reporting to `streams`.
+fn copy_with(
+    sources: &[PathBuf],
+    target: &Path,
+    options: &Options,
+    streams: &mut Streams,
+) -> CopyResult<()> {
     let target_type = TargetType::determine(sources, target);
     verify_target_type(target, target_type)?;
 
@@ -1535,6 +1557,7 @@ pub fn copy(sources: &[PathBuf], target: &Path, options: &Options) -> CopyResult
                 target,
                 target_type,
                 options,
+                streams,
                 &mut symlinked_files,
                 &copied_destinations,
                 &mut copied_files,
@@ -1609,6 +1632,7 @@ fn copy_source(
     target: &Path,
     target_type: TargetType,
     options: &Options,
+    streams: &mut Streams,
     symlinked_files: &mut HashSet<FileInformation>,
     copied_destinations: &HashSet<PathBuf>,
     copied_files: &mut HashMap<FileInformation, PathBuf>,
@@ -1622,6 +1646,7 @@ fn copy_source(
             source,
             target,
             options,
+            streams,
             symlinked_files,
             copied_destinations,
             copied_files,
@@ -1645,6 +1670,7 @@ fn copy_source(
                 source_path,
                 dest.as_path(),
                 options,
+                streams,
                 symlinked_files,
                 copied_destinations,
                 copied_files,
@@ -1703,11 +1729,16 @@ fn file_mode_for_interactive_overwrite(_: &Path) -> Option<(String, String)> {
 }
 
 impl OverwriteMode {
-    fn verify(self, path: &Path, debug: bool) -> CopyResult<()> {
+    fn verify(self, path: &Path, debug: bool, streams: &mut Streams) -> CopyResult<()> {
         match self {
             Self::NoClobber => {
                 if debug {
-                    println!("{}", translate!("cp-debug-skipped", "path" => path.quote()));
+                    writeln!(
+                        streams.stdout(),
+                        "{}",
+                        translate!("cp-debug-skipped", "path" => path.quote())
+                    )
+                    .expect("failed printing to stdout");
                 }
                 Err(CpError::Skipped(false))
             }
@@ -1717,10 +1748,10 @@ impl OverwriteMode {
                 {
                     let prompt_msg =
                         translate!("cp-prompt-overwrite-with-mode", "path" => path.quote());
-                    prompt_yes!("{prompt_msg} {octal} ({human_readable})?")
+                    prompt_yes_on!(streams, "{prompt_msg} {octal} ({human_readable})?")
                 } else {
                     let prompt_msg = translate!("cp-prompt-overwrite", "path" => path.quote());
-                    prompt_yes!("{prompt_msg}")
+                    prompt_yes_on!(streams, "{prompt_msg}")
                 };
 
                 if prompt_yes_result {
@@ -2262,6 +2293,7 @@ fn handle_existing_dest(
     source: &Path,
     dest: &Path,
     options: &Options,
+    streams: &mut Streams,
     source_in_command_line: bool,
     copied_files: &HashMap<FileInformation, PathBuf>,
 ) -> CopyResult<()> {
@@ -2276,13 +2308,14 @@ fn handle_existing_dest(
 
     if options.update == UpdateMode::None {
         if options.debug {
-            println!("skipped {}", dest.quote());
+            writeln!(streams.stdout(), "skipped {}", dest.quote())
+                .expect("failed printing to stdout");
         }
         return Err(CpError::Skipped(false));
     }
 
     if options.update != UpdateMode::IfOlder {
-        options.overwrite.verify(dest, options.debug)?;
+        options.overwrite.verify(dest, options.debug, streams)?;
     }
 
     let mut is_dest_removed = false;
@@ -2300,6 +2333,7 @@ fn handle_existing_dest(
             source,
             dest,
             options,
+            streams,
             source_in_command_line,
             copied_files,
         )?;
@@ -2317,6 +2351,7 @@ fn delete_dest_if_needed_and_allowed(
     source: &Path,
     dest: &Path,
     options: &Options,
+    streams: &mut Streams,
     source_in_command_line: bool,
     copied_files: &HashMap<FileInformation, PathBuf>,
 ) -> CopyResult<()> {
@@ -2361,13 +2396,13 @@ fn delete_dest_if_needed_and_allowed(
     };
 
     if delete_dest {
-        delete_path(dest, options)
+        delete_path(dest, options, streams)
     } else {
         Ok(())
     }
 }
 
-fn delete_path(path: &Path, options: &Options) -> CopyResult<()> {
+fn delete_path(path: &Path, options: &Options, streams: &mut Streams) -> CopyResult<()> {
     // Windows requires clearing readonly attribute before deletion when using --force
     #[cfg(windows)]
     if options.force()
@@ -2381,10 +2416,12 @@ fn delete_path(path: &Path, options: &Options) -> CopyResult<()> {
     match fs::remove_file(path) {
         Ok(()) => {
             if options.verbose {
-                println!(
+                writeln!(
+                    streams.stdout(),
                     "{}",
                     translate!("cp-verbose-removed", "path" => path.quote())
-                );
+                )
+                .expect("failed printing to stdout");
             }
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -2520,21 +2557,22 @@ pub(crate) fn print_verbose_output(
     progress_bar: Option<&ProgressBar>,
     source: &Path,
     dest: &Path,
+    streams: &mut Streams,
 ) -> CopyResult<()> {
     if let Some(pb) = progress_bar {
         // Suspend (hide) the progress bar so the println won't overlap with the progress bar.
-        pb.suspend(|| print_paths(parents, source, dest))
+        pb.suspend(|| print_paths(parents, source, dest, streams))
     } else {
-        print_paths(parents, source, dest)
+        print_paths(parents, source, dest, streams)
     }
 }
 
-fn print_paths(parents: bool, source: &Path, dest: &Path) -> CopyResult<()> {
+fn print_paths(parents: bool, source: &Path, dest: &Path, streams: &mut Streams) -> CopyResult<()> {
     use std::io::Write;
 
     // Buffer the output so a failed write (e.g. stdout redirected to a full
     // disk) surfaces as one error instead of panicking inside println!.
-    let mut out = io::BufWriter::new(io::stdout().lock());
+    let mut out = io::BufWriter::new(streams.stdout());
     let write_err = |e| CpError::IoErrContext(e, translate!("cp-error-write"));
     if parents {
         // For example, if copying file `a/b/c` and its parents
@@ -2568,6 +2606,7 @@ fn handle_copy_mode(
     source: &Path,
     dest: &Path,
     options: &Options,
+    streams: &mut Streams,
     context: &str,
     source_metadata: &Metadata,
     symlinked_files: &mut HashSet<FileInformation>,
@@ -2610,6 +2649,7 @@ fn handle_copy_mode(
                 source,
                 dest,
                 options,
+                streams,
                 context,
                 source_metadata,
                 symlinked_files,
@@ -2634,6 +2674,7 @@ fn handle_copy_mode(
                             source,
                             dest,
                             options,
+                            streams,
                             context,
                             source_metadata,
                             symlinked_files,
@@ -2643,7 +2684,8 @@ fn handle_copy_mode(
                     }
                     UpdateMode::None => {
                         if options.debug {
-                            println!("skipped {}", dest.quote());
+                            writeln!(streams.stdout(), "skipped {}", dest.quote())
+                                .expect("failed printing to stdout");
                         }
 
                         return Ok(PerformedAction::Skipped);
@@ -2662,12 +2704,13 @@ fn handle_copy_mode(
                             return Ok(PerformedAction::Skipped);
                         }
 
-                        options.overwrite.verify(dest, options.debug)?;
+                        options.overwrite.verify(dest, options.debug, streams)?;
 
                         copy_helper(
                             source,
                             dest,
                             options,
+                            streams,
                             context,
                             source_metadata,
                             symlinked_files,
@@ -2681,6 +2724,7 @@ fn handle_copy_mode(
                     source,
                     dest,
                     options,
+                    streams,
                     context,
                     source_metadata,
                     symlinked_files,
@@ -2698,16 +2742,22 @@ fn handle_copy_mode(
             {
                 let ft = source_metadata.file_type();
                 if ft.is_fifo() {
-                    return copy_fifo(dest, options.overwrite, options.debug)
+                    return copy_fifo(dest, options.overwrite, options.debug, streams)
                         .map(|()| PerformedAction::Copied);
                 }
                 if ft.is_socket() {
-                    return copy_socket(dest, options.overwrite, options.debug)
+                    return copy_socket(dest, options.overwrite, options.debug, streams)
                         .map(|()| PerformedAction::Copied);
                 }
                 if ft.is_char_device() || ft.is_block_device() {
-                    return copy_node(dest, source_metadata, options.overwrite, options.debug)
-                        .map(|()| PerformedAction::Copied);
+                    return copy_node(
+                        dest,
+                        source_metadata,
+                        options.overwrite,
+                        options.debug,
+                        streams,
+                    )
+                    .map(|()| PerformedAction::Copied);
                 }
             }
             OpenOptions::new()
@@ -2785,6 +2835,7 @@ fn copy_file(
     source: &Path,
     dest: &Path,
     options: &Options,
+    streams: &mut Streams,
     symlinked_files: &mut HashSet<FileInformation>,
     copied_destinations: &HashSet<PathBuf>,
     copied_files: &mut HashMap<FileInformation, PathBuf>,
@@ -2879,7 +2930,14 @@ fn copy_file(
                 }
             }
         }
-        handle_existing_dest(source, dest, options, source_in_command_line, copied_files)?;
+        handle_existing_dest(
+            source,
+            dest,
+            options,
+            streams,
+            source_in_command_line,
+            copied_files,
+        )?;
         if are_hardlinks_to_same_file(source, dest) {
             if options.copy_mode == CopyMode::Copy {
                 return Ok(());
@@ -2930,7 +2988,7 @@ fn copy_file(
             fs::hard_link(new_source, dest)?;
 
             if options.verbose {
-                print_verbose_output(options.parents, progress_bar, source, dest)?;
+                print_verbose_output(options.parents, progress_bar, source, dest, streams)?;
             }
 
             return Ok(());
@@ -2972,6 +3030,7 @@ fn copy_file(
         source,
         dest,
         options,
+        streams,
         context,
         &source_metadata,
         symlinked_files,
@@ -2980,7 +3039,7 @@ fn copy_file(
     )?;
 
     if options.verbose && performed_action != PerformedAction::Skipped {
-        print_verbose_output(options.parents, progress_bar, source, dest)?;
+        print_verbose_output(options.parents, progress_bar, source, dest, streams)?;
     }
 
     // TODO: implement something similar to gnu's lchown
@@ -3144,6 +3203,7 @@ fn copy_helper(
     source: &Path,
     dest: &Path,
     options: &Options,
+    streams: &mut Streams,
     context: &str,
     source_metadata: &Metadata,
     symlinked_files: &mut HashSet<FileInformation>,
@@ -3165,18 +3225,24 @@ fn copy_helper(
     if options.recursive && !options.copy_contents {
         let ft = source_metadata.file_type();
         if ft.is_socket() {
-            return copy_socket(dest, options.overwrite, options.debug);
+            return copy_socket(dest, options.overwrite, options.debug, streams);
         }
         if ft.is_fifo() {
-            return copy_fifo(dest, options.overwrite, options.debug);
+            return copy_fifo(dest, options.overwrite, options.debug, streams);
         }
         if ft.is_char_device() || ft.is_block_device() {
-            return copy_node(dest, source_metadata, options.overwrite, options.debug);
+            return copy_node(
+                dest,
+                source_metadata,
+                options.overwrite,
+                options.debug,
+                streams,
+            );
         }
     }
 
     if source_metadata.is_symlink() {
-        copy_link(source, dest, symlinked_files, options)?;
+        copy_link(source, dest, symlinked_files, options, streams)?;
     } else {
         // Use O_NOFOLLOW on the source open iff cp is in no-dereference mode.
         // In that case source_metadata was obtained via lstat, so a path swap
@@ -3199,7 +3265,7 @@ fn copy_helper(
         )?;
 
         if !options.attributes_only && options.debug {
-            show_debug(&copy_debug)
+            show_debug(&copy_debug, streams)
                 .map_err(|e| CpError::IoErrContext(e, translate!("cp-error-write")))?;
         }
     }
@@ -3210,9 +3276,14 @@ fn copy_helper(
 // "Copies" a FIFO by creating a new one. This workaround is because Rust's
 // built-in fs::copy does not handle FIFOs (see rust-lang/rust/issues/79390).
 #[cfg(unix)]
-fn copy_fifo(dest: &Path, overwrite: OverwriteMode, debug: bool) -> CopyResult<()> {
+fn copy_fifo(
+    dest: &Path,
+    overwrite: OverwriteMode,
+    debug: bool,
+    streams: &mut Streams,
+) -> CopyResult<()> {
     if dest.exists() {
-        overwrite.verify(dest, debug)?;
+        overwrite.verify(dest, debug, streams)?;
         fs::remove_file(dest)?;
     }
     // rustix::fs::mkfifoat is linux only
@@ -3221,9 +3292,14 @@ fn copy_fifo(dest: &Path, overwrite: OverwriteMode, debug: bool) -> CopyResult<(
 }
 
 #[cfg(unix)]
-fn copy_socket(dest: &Path, overwrite: OverwriteMode, debug: bool) -> CopyResult<()> {
+fn copy_socket(
+    dest: &Path,
+    overwrite: OverwriteMode,
+    debug: bool,
+    streams: &mut Streams,
+) -> CopyResult<()> {
     if dest.exists() {
-        overwrite.verify(dest, debug)?;
+        overwrite.verify(dest, debug, streams)?;
         fs::remove_file(dest)?;
     }
 
@@ -3237,9 +3313,10 @@ fn copy_node(
     source_metadata: &Metadata,
     overwrite: OverwriteMode,
     debug: bool,
+    streams: &mut Streams,
 ) -> CopyResult<()> {
     if dest.exists() {
-        overwrite.verify(dest, debug)?;
+        overwrite.verify(dest, debug, streams)?;
         fs::remove_file(dest)?;
     }
     let sflag = if source_metadata.file_type().is_char_device() {
@@ -3257,13 +3334,14 @@ fn copy_link(
     dest: &Path,
     symlinked_files: &mut HashSet<FileInformation>,
     options: &Options,
+    streams: &mut Streams,
 ) -> CopyResult<()> {
     // Here, we will copy the symlink itself (actually, just recreate it)
     let link = fs::read_link(source)?;
     // we always need to remove the file to be able to create a symlink,
     // even if it is writeable.
     if dest.is_symlink() || dest.is_file() {
-        delete_path(dest, options)?;
+        delete_path(dest, options, streams)?;
     }
     symlink_file(&link, dest, symlinked_files)?;
     copy_attributes(

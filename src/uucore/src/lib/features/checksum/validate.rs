@@ -10,7 +10,7 @@ use crate::util_name;
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write, stderr, stdin};
+use std::io::{self, BufReader, Read, Write, stderr};
 
 use os_display::Quotable;
 
@@ -19,6 +19,7 @@ use crate::checksum::{
     digest_reader, parse_blake_length, unescape_filename,
 };
 use crate::error::{FromIo, UError, UResult, USimpleError, strip_errno};
+use crate::io::Streams;
 use crate::quoting_style::locale_aware_shell_escape;
 use crate::sum::{self, Blake2b, Blake3, DigestOutput};
 use crate::{
@@ -595,13 +596,14 @@ fn get_raw_expected_digest(checksum: &str, len_hint: Option<HashLength>) -> Opti
 fn get_file_to_check(
     filename: &OsStr,
     opts: ChecksumValidateOptions,
+    streams: &mut Streams,
 ) -> Result<Box<dyn Read>, LineCheckError> {
     if filename == "-" {
-        Ok(Box::new(stdin())) // Use stdin if "-" is specified in the checksum file
+        Ok(streams.take_stdin()) // Use stdin if "-" is specified in the checksum file
     } else {
-        let failed_open = || {
+        let mut failed_open = || {
             let _ = write_file_report(
-                io::stdout(),
+                streams.stdout(),
                 filename,
                 FileChecksumResult::CantOpen,
                 opts.verbose,
@@ -739,6 +741,7 @@ fn compute_and_check_digest_from_file(
     expected_checksum: &[u8],
     algo: SizedAlgoKind,
     opts: ChecksumValidateOptions,
+    streams: &mut Streams,
 ) -> Result<(), LineCheckError> {
     // Only names on lines starting with a backslash are escaped.
     let filename_to_check_unescaped = if escaped {
@@ -749,7 +752,7 @@ fn compute_and_check_digest_from_file(
     let real_filename_to_check = os_str_from_bytes(&filename_to_check_unescaped)?;
 
     // Open the input file
-    let file_to_check = get_file_to_check(real_filename_to_check, opts)?;
+    let file_to_check = get_file_to_check(real_filename_to_check, opts, streams)?;
     let mut file_reader = BufReader::new(file_to_check);
 
     // Read the file and calculate the checksum
@@ -767,7 +770,7 @@ fn compute_and_check_digest_from_file(
                 );
 
                 let _ = write_file_report(
-                    io::stdout(),
+                    streams.stdout(),
                     real_filename_to_check,
                     FileChecksumResult::CantOpen,
                     opts.verbose,
@@ -783,7 +786,7 @@ fn compute_and_check_digest_from_file(
         DigestOutput::U16(n) => n.to_be_bytes() == expected_checksum,
     };
     let _ = write_file_report(
-        io::stdout(),
+        streams.stdout(),
         real_filename_to_check,
         FileChecksumResult::from_bool(checksum_correct),
         opts.verbose,
@@ -802,6 +805,7 @@ fn process_algo_based_line(
     cli_algo_kind: Option<AlgoKind>,
     opts: ChecksumValidateOptions,
     last_algo: &mut Option<String>,
+    streams: &mut Streams,
 ) -> Result<(), LineCheckError> {
     let filename_to_check = line_info.filename.as_slice();
 
@@ -830,6 +834,7 @@ fn process_algo_based_line(
         &expected_checksum,
         algo,
         opts,
+        streams,
     )
 }
 
@@ -839,6 +844,7 @@ fn process_non_algo_based_line(
     cli_algo_kind: AlgoKind,
     cli_algo_length: Option<HashLength>,
     opts: ChecksumValidateOptions,
+    streams: &mut Streams,
 ) -> Result<(), LineCheckError> {
     use AlgoKind as ak;
 
@@ -875,6 +881,7 @@ fn process_non_algo_based_line(
         &expected_checksum,
         algo,
         opts,
+        streams,
     )
 }
 
@@ -891,6 +898,7 @@ fn process_checksum_line(
     opts: ChecksumValidateOptions,
     cached_line_format: &mut Option<LineFormat>,
     last_algo: &mut Option<String>,
+    streams: &mut Streams,
 ) -> Result<(), LineCheckError> {
     let line_bytes = os_str_as_bytes(line).map_err(|e| LineCheckError::UError(Box::new(e)))?;
 
@@ -908,11 +916,11 @@ fn process_checksum_line(
         .ok_or(LineCheckError::ImproperlyFormatted)?;
 
     let result = if line_info.format == LineFormat::AlgoBased {
-        process_algo_based_line(&line_info, cli_algo_name, opts, last_algo)
+        process_algo_based_line(&line_info, cli_algo_name, opts, last_algo, streams)
     } else if let Some(cli_algo) = cli_algo_name {
         // If we match a non-algo based parser, we expect a cli argument
         // to give us the algorithm to use
-        process_non_algo_based_line(&line_info, cli_algo, cli_algo_length, opts)
+        process_non_algo_based_line(&line_info, cli_algo, cli_algo_length, opts, streams)
     } else {
         // We have no clue of what algorithm to use
         Err(LineCheckError::ImproperlyFormatted)
@@ -929,6 +937,7 @@ fn process_checksum_file(
     cli_algo_kind: Option<AlgoKind>,
     cli_algo_length: Option<HashLength>,
     opts: ChecksumValidateOptions,
+    streams: &mut Streams,
 ) -> Result<(), FileCheckError> {
     use LineCheckError::{
         CantOpenFile, DigestMismatch, FileIsDirectory, FileNotFound, ImproperlyFormatted, Skipped,
@@ -941,7 +950,7 @@ fn process_checksum_file(
 
     let file: Box<dyn Read> = if input_is_stdin {
         // Use stdin if "-" is specified
-        Box::new(stdin())
+        streams.take_stdin()
     } else {
         match get_input_file(filename_input) {
             Ok(f) => f,
@@ -975,6 +984,7 @@ fn process_checksum_file(
             opts,
             &mut cached_line_format,
             &mut last_algo,
+            streams,
         );
 
         // Match a first time to elude critical UErrors, and increment the total
@@ -1068,6 +1078,7 @@ pub fn perform_checksum_validation<'a, I>(
     algo_kind: Option<AlgoKind>,
     length_input: Option<HashLength>,
     opts: ChecksumValidateOptions,
+    streams: &mut Streams,
 ) -> UResult<()>
 where
     I: Iterator<Item = &'a OsStr>,
@@ -1077,7 +1088,7 @@ where
     // if cksum has several input files, it will print the result for each file
     for filename_input in files {
         use FileCheckError::{CantOpenChecksumFile, Failed, UError};
-        match process_checksum_file(filename_input, algo_kind, length_input, opts) {
+        match process_checksum_file(filename_input, algo_kind, length_input, opts, streams) {
             Err(UError(e)) => return Err(e),
             Err(Failed | CantOpenChecksumFile) => failed = true,
             Ok(_) => (),
@@ -1397,6 +1408,7 @@ mod tests {
             opts,
             cached_line_format,
             &mut None,
+            &mut Streams::given(Box::new(io::empty()), &mut io::sink()),
         )
     }
 

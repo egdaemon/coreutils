@@ -7,7 +7,6 @@
 
 use std::borrow::Borrow;
 use std::ffi::OsString;
-use std::io;
 
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint};
@@ -18,6 +17,7 @@ use uucore::checksum::compute::{
 use uucore::checksum::validate::{self, ChecksumValidateOptions, ChecksumVerbose};
 use uucore::checksum::{AlgoKind, ChecksumError, HashLength, SizedAlgoKind};
 use uucore::error::UResult;
+use uucore::io::Streams;
 use uucore::line_ending::LineEnding;
 use uucore::{crate_version, format_usage, localized_help_template, util_name};
 
@@ -40,7 +40,26 @@ macro_rules! declare_standalone {
     ($bin:literal, $kind:expr) => {
         #[::uucore::main]
         pub fn uumain(args: impl ::uucore::Args) -> ::uucore::error::UResult<()> {
-            ::uu_checksum_common::standalone_main($kind, uu_app(), args)
+            ::uu_checksum_common::standalone_main(
+                $kind,
+                uu_app(),
+                args,
+                &mut ::uucore::io::Streams::process(),
+            )
+        }
+
+        /// Runs the checksum like [`uumain`], isolated from the process's standard streams.
+        pub fn uumain_with(
+            args: impl ::uucore::Args,
+            stdin: Box<dyn ::std::io::Read>,
+            stdout: &mut dyn ::std::io::Write,
+        ) -> ::uucore::error::UResult<()> {
+            ::uu_checksum_common::standalone_main(
+                $kind,
+                uu_app(),
+                args,
+                &mut ::uucore::io::Streams::given(stdin, stdout),
+            )
         }
 
         #[inline]
@@ -66,6 +85,7 @@ pub fn standalone_with_length_main(
     args: impl uucore::Args,
     validate_len: fn(&str) -> UResult<HashLength>,
     allow_empty_filename: bool,
+    streams: &mut Streams,
 ) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(cmd, args)?;
     let algo = Some(algo);
@@ -81,11 +101,16 @@ pub fn standalone_with_length_main(
     let tag = matches.get_flag(options::TAG);
     let format = OutputFormat::from_standalone(text, tag);
 
-    checksum_main(algo, length, matches, format, allow_empty_filename)
+    checksum_main(algo, length, matches, format, allow_empty_filename, streams)
 }
 
 /// Entrypoint for standalone checksums *NOT* accepting the `--length` argument
-pub fn standalone_main(algo: AlgoKind, cmd: Command, args: impl uucore::Args) -> UResult<()> {
+pub fn standalone_main(
+    algo: AlgoKind,
+    cmd: Command,
+    args: impl uucore::Args,
+    streams: &mut Streams,
+) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(cmd, args)?;
     let algo = Some(algo);
     //todo: deduplicate matches.get_flag
@@ -94,7 +119,7 @@ pub fn standalone_main(algo: AlgoKind, cmd: Command, args: impl uucore::Args) ->
     let format = OutputFormat::from_standalone(text, tag);
 
     // md5sum and sha*sum report an untagged line with no file name as improperly formatted.
-    checksum_main(algo, None, matches, format, false)
+    checksum_main(algo, None, matches, format, false, streams)
 }
 
 /// Base command processing for all the checksum executables.
@@ -141,13 +166,15 @@ pub fn standalone_checksum_app(about: String, usage: String) -> Command {
 }
 
 /// This is the common entrypoint to all checksum utils. Performs some
-/// validation on arguments and proceeds in computing or checking mode.
+/// validation on arguments and proceeds in computing or checking mode, reading `-` from and
+/// writing to `streams`.
 pub fn checksum_main(
     algo: Option<AlgoKind>,
     length: Option<HashLength>,
     matches: ArgMatches,
     output_format: OutputFormat,
     allow_empty_filename: bool,
+    streams: &mut Streams,
 ) -> UResult<()> {
     let check = matches.get_flag("check");
 
@@ -201,7 +228,7 @@ pub fn checksum_main(
             verbose,
         };
 
-        return validate::perform_checksum_validation(files, algo, length, opts);
+        return validate::perform_checksum_validation(files, algo, length, opts, streams);
     }
 
     // Not --check
@@ -218,7 +245,7 @@ pub fn checksum_main(
         line_ending,
     };
 
-    perform_checksum_computation(io::stdout(), opts, files)?;
+    perform_checksum_computation(streams, opts, files)?;
 
     Ok(())
 }

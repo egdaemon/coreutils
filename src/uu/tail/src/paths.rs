@@ -133,9 +133,18 @@ impl HeaderPrinter {
     }
 
     pub fn print(&mut self, string: &str) -> io::Result<()> {
+        self.write(string, &mut stdout().lock())
+    }
+
+    /// Like [`Self::print_input`], writing to `stdout` instead of the process's standard output.
+    pub fn write_input(&mut self, input: &Input, stdout: &mut dyn Write) -> io::Result<()> {
+        self.write(input.display_name.as_str(), stdout)
+    }
+
+    fn write(&mut self, string: &str, stdout: &mut dyn Write) -> io::Result<()> {
         if self.verbose {
             writeln!(
-                stdout().lock(),
+                stdout,
                 "{}==> {} <==",
                 if self.first_header { "" } else { "\n" },
                 // GNU quotes the name shown in the header when it needs it.

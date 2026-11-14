@@ -6,7 +6,7 @@
 // spell-checker:ignore (vars) memrchr
 
 use clap::ArgMatches;
-use memchr::memrchr_iter;
+use memchr::{memchr_iter, memrchr_iter};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -221,14 +221,14 @@ fn print_n_bytes(input: impl AsFd, n: u64) -> io::Result<u64> {
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn print_n_bytes(input: impl Read, n: u64) -> io::Result<u64> {
+    write_n_bytes(input, n, &mut io::stdout().lock())
+}
+
+fn write_n_bytes(input: impl Read, n: u64, stdout: &mut dyn Write) -> io::Result<u64> {
     // Read the first `n` bytes from the `input` reader.
     let mut reader = input.take(n);
 
-    // Write those bytes to `stdout`.
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-
-    let bytes_written = io::copy(&mut reader, &mut stdout).map_err(wrap_in_stdout_error)?;
+    let bytes_written = io::copy(&mut reader, stdout).map_err(wrap_in_stdout_error)?;
 
     // flush prevents ignoring I/O error
     stdout.flush().map_err(wrap_in_stdout_error)?;
@@ -236,13 +236,16 @@ fn print_n_bytes(input: impl Read, n: u64) -> io::Result<u64> {
     Ok(bytes_written)
 }
 
-fn print_n_lines(input: &mut impl io::BufRead, n: u64, separator: u8) -> io::Result<u64> {
+fn print_n_lines(
+    input: &mut impl io::BufRead,
+    n: u64,
+    separator: u8,
+    stdout: &mut dyn Write,
+) -> io::Result<u64> {
     // Read the first `n` lines from the `input` reader.
     let mut reader = take_lines(input, n, separator);
 
     // Write those bytes to `stdout`.
-    let stdout = io::stdout();
-    let stdout = stdout.lock();
     let mut writer = BufWriter::with_capacity(BUF_SIZE, stdout);
 
     let bytes_written = io::copy(&mut reader, &mut writer).map_err(wrap_in_stdout_error)?;
@@ -255,13 +258,10 @@ fn print_n_lines(input: &mut impl io::BufRead, n: u64, separator: u8) -> io::Res
     Ok(bytes_written)
 }
 
-fn print_but_last_n_bytes(mut input: impl Read, n: u64) -> io::Result<u64> {
+fn print_but_last_n_bytes(mut input: impl Read, n: u64, stdout: &mut dyn Write) -> io::Result<u64> {
     let mut bytes_written: u64 = 0;
     if let Ok(n) = usize::try_from(n) {
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
-
-        bytes_written = copy_all_but_n_bytes(&mut input, &mut stdout, n)
+        bytes_written = copy_all_but_n_bytes(&mut input, &mut &mut *stdout, n)
             .map_err(wrap_in_stdout_error)?
             .try_into()
             .unwrap();
@@ -274,15 +274,18 @@ fn print_but_last_n_bytes(mut input: impl Read, n: u64) -> io::Result<u64> {
     Ok(bytes_written)
 }
 
-fn print_but_last_n_lines(mut input: impl Read, n: u64, separator: u8) -> io::Result<u64> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+fn print_but_last_n_lines(
+    mut input: impl Read,
+    n: u64,
+    separator: u8,
+    stdout: &mut dyn Write,
+) -> io::Result<u64> {
     if n == 0 {
-        return io::copy(&mut input, &mut stdout).map_err(wrap_in_stdout_error);
+        return io::copy(&mut input, stdout).map_err(wrap_in_stdout_error);
     }
     let mut bytes_written: u64 = 0;
     if let Ok(n) = usize::try_from(n) {
-        bytes_written = copy_all_but_n_lines(input, &mut stdout, n, separator)
+        bytes_written = copy_all_but_n_lines(input, &mut &mut *stdout, n, separator)
             .map_err(wrap_in_stdout_error)?
             .try_into()
             .unwrap();
@@ -403,8 +406,13 @@ fn head_backwards_file(input: &mut File, options: &HeadOptions) -> io::Result<u6
 
 fn head_backwards_without_seek_file(input: &mut File, options: &HeadOptions) -> io::Result<u64> {
     match options.mode {
-        Mode::AllButLastBytes(n) => print_but_last_n_bytes(input, n),
-        Mode::AllButLastLines(n) => print_but_last_n_lines(input, n, options.line_ending.into()),
+        Mode::AllButLastBytes(n) => print_but_last_n_bytes(input, n, &mut io::stdout().lock()),
+        Mode::AllButLastLines(n) => print_but_last_n_lines(
+            input,
+            n,
+            options.line_ending.into(),
+            &mut io::stdout().lock(),
+        ),
         _ => unreachable!(),
     }
 }
@@ -434,14 +442,38 @@ fn head_file(input: &mut File, options: &HeadOptions) -> io::Result<u64> {
             &mut io::BufReader::with_capacity(BUF_SIZE, input),
             n,
             options.line_ending.into(),
+            &mut io::stdout().lock(),
         ),
         Mode::AllButLastBytes(_) | Mode::AllButLastLines(_) => head_backwards_file(input, options),
     }
 }
 
+/// Copies the head of `input` to `stdout` without the fast paths, which need the process's own
+/// file descriptors.
+fn head_reader(input: impl Read, options: &HeadOptions, stdout: &mut dyn Write) -> io::Result<u64> {
+    let separator = options.line_ending.into();
+    match options.mode {
+        Mode::FirstBytes(n) => write_n_bytes(input, n, stdout),
+        Mode::AllButLastBytes(n) => print_but_last_n_bytes(input, n, stdout),
+        Mode::FirstLines(n) => print_n_lines(
+            &mut io::BufReader::with_capacity(BUF_SIZE, input),
+            n,
+            separator,
+            stdout,
+        ),
+        Mode::AllButLastLines(n) => print_but_last_n_lines(input, n, separator, stdout),
+    }
+}
+
+/// Runs head over its files. Given a `stdin`, head reads it in place of the process's stdin, and
+/// copies every file to `stdout` through [`head_reader`].
 #[allow(clippy::cognitive_complexity)]
-fn uu_head(options: &HeadOptions) -> UResult<()> {
-    let mut stdout = io::stdout().lock();
+fn uu_head(
+    options: &HeadOptions,
+    mut stdin: Option<&mut dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let isolated = stdin.is_some();
     let mut first = true;
     for file in &options.files {
         let res = if file == "-" {
@@ -451,6 +483,11 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 }
                 let name = locale_aware_shell_escape(translate!("head-name-stdin"));
                 writeln!(stdout, "==> {name} <==")?;
+            }
+            if let Some(stdin) = stdin.as_deref_mut() {
+                head_reader(stdin, options, stdout)?;
+                first = false;
+                continue;
             }
             let stdin = io::stdin();
 
@@ -477,11 +514,21 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
 
                 match options.mode {
                     Mode::FirstBytes(n) => print_n_bytes(&mut stdin, n),
-                    Mode::AllButLastBytes(n) => print_but_last_n_bytes(&mut stdin, n),
-                    Mode::FirstLines(n) => print_n_lines(&mut stdin, n, options.line_ending.into()),
-                    Mode::AllButLastLines(n) => {
-                        print_but_last_n_lines(&mut stdin, n, options.line_ending.into())
+                    Mode::AllButLastBytes(n) => {
+                        print_but_last_n_bytes(&mut stdin, n, &mut io::stdout().lock())
                     }
+                    Mode::FirstLines(n) => print_n_lines(
+                        &mut stdin,
+                        n,
+                        options.line_ending.into(),
+                        &mut io::stdout().lock(),
+                    ),
+                    Mode::AllButLastLines(n) => print_but_last_n_lines(
+                        &mut stdin,
+                        n,
+                        options.line_ending.into(),
+                        &mut io::stdout().lock(),
+                    ),
                 }?;
             }
 
@@ -553,7 +600,11 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 }
                 continue;
             }
-            head_file(&mut file_handle, options)?;
+            if isolated {
+                head_reader(&mut file_handle, options, stdout)?;
+            } else {
+                head_file(&mut file_handle, options)?;
+            }
             Ok(())
         };
         if let Err(err) = res {
@@ -575,6 +626,87 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let options = parse(args)?;
+    uu_head(&options, None, &mut io::stdout().lock())
+}
+
+/// Runs head like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let options = parse(args)?;
+    uu_head(&options, Some(&mut *stdin), stdout)
+}
+
+/// Head driven a chunk of stdin at a time, for callers that stream stdin as it arrives. Only the
+/// first lines or bytes of a lone stdin stream: nothing after them is needed.
+pub struct Head {
+    remaining: u64,
+    // the line separator when head takes lines, none when it takes bytes.
+    separator: Option<u8>,
+}
+
+impl Head {
+    /// Parses the arguments like [`uumain`]. There is no `Head` when they ask for more than a
+    /// prefix of a lone stdin.
+    pub fn new(args: impl uucore::Args) -> UResult<Option<Self>> {
+        let options = parse(args)?;
+        if options.verbose || options.files != ["-"] {
+            return Ok(None);
+        }
+
+        Ok(match options.mode {
+            Mode::FirstBytes(n) => Some(Self {
+                remaining: n,
+                separator: None,
+            }),
+            Mode::FirstLines(n) => Some(Self {
+                remaining: n,
+                separator: Some(options.line_ending.into()),
+            }),
+            Mode::AllButLastBytes(_) | Mode::AllButLastLines(_) => None,
+        })
+    }
+
+    /// Writes the part of `chunk` head takes to `stdout`. Returns true once head has taken all it
+    /// wants, so the rest of stdin can be ignored.
+    pub fn write(&mut self, chunk: &[u8], stdout: &mut dyn Write) -> io::Result<bool> {
+        let take = match self.separator {
+            None => self.bytes(chunk),
+            Some(separator) => self.lines(chunk, separator),
+        };
+
+        stdout
+            .write_all(&chunk[..take])
+            .map_err(wrap_in_stdout_error)?;
+        Ok(self.remaining == 0)
+    }
+
+    /// The length of the prefix of `chunk` holding the bytes head still wants, counting them off.
+    fn bytes(&mut self, chunk: &[u8]) -> usize {
+        let take = usize::try_from(self.remaining).map_or(chunk.len(), |n| n.min(chunk.len()));
+        self.remaining -= take as u64;
+        take
+    }
+
+    /// The length of the prefix of `chunk` holding the lines head still wants, counting them off.
+    fn lines(&mut self, chunk: &[u8], separator: u8) -> usize {
+        if self.remaining == 0 {
+            return 0;
+        }
+        for end in memchr_iter(separator, chunk) {
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                return end + 1;
+            }
+        }
+        chunk.len()
+    }
+}
+
+fn parse(args: impl uucore::Args) -> UResult<HeadOptions> {
     let raw_args: Vec<_> = args.collect();
     // Capture before obsolete options such as `-5` are rewritten to `-n 5`.
     let diag_args = uucore::diagnostics::capture(&raw_args);
@@ -582,7 +714,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     let options =
         HeadOptions::get_from(&matches).map_err(|e| e.into_error(diag_args.as_deref()))?;
-    uu_head(&options)
+    Ok(options)
 }
 
 #[cfg(test)]
@@ -708,7 +840,7 @@ mod tests {
     fn read_early_exit() {
         let mut empty = io::BufReader::new(Cursor::new(Vec::new()));
         assert!(print_n_bytes(&mut empty, 0).is_ok());
-        assert!(print_n_lines(&mut empty, 0, b'\n').is_ok());
+        assert!(print_n_lines(&mut empty, 0, b'\n', &mut io::sink()).is_ok());
     }
 
     #[test]

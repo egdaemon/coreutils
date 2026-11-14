@@ -30,6 +30,7 @@ use rustix::process::{getegid, geteuid};
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{Read, Write};
 use std::mem::size_of;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -61,7 +62,31 @@ pub fn uu_app() -> Command {
 }
 
 #[uucore::main(no_signals)]
-pub fn uumain(mut args: impl uucore::Args) -> UResult<()> {
+pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    test(
+        args,
+        TestEvaluator {
+            is_terminal: fd_is_terminal,
+        },
+    )
+}
+
+/// Runs test like [`uumain`], isolated from the process's standard streams. No descriptor is a
+/// terminal, so `-t` is always false.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    _stdout: &mut dyn Write,
+) -> UResult<()> {
+    test(
+        args,
+        TestEvaluator {
+            is_terminal: |_| false,
+        },
+    )
+}
+
+fn test(mut args: impl uucore::Args, evaluator: TestEvaluator) -> UResult<()> {
     let program = args.next().unwrap_or_else(|| OsString::from("test"));
     let binary_name = uucore::util_name();
     let mut args: Vec<_> = args.collect();
@@ -89,7 +114,7 @@ pub fn uumain(mut args: impl uucore::Args) -> UResult<()> {
     }
     let expression = uucore::diagnostics::capture(&args);
 
-    match evaluate(&args, TestEvaluator) {
+    match evaluate(&args, evaluator) {
         Ok(true) => Ok(()),
         Ok(false) => Err(1.into()),
         Err(e) => Err(uucore::diagnostics::error_after_report(
@@ -100,7 +125,9 @@ pub fn uumain(mut args: impl uucore::Args) -> UResult<()> {
     }
 }
 
-struct TestEvaluator;
+struct TestEvaluator {
+    is_terminal: fn(i32) -> bool,
+}
 
 fn operand_value(operand: Operand<'_>) -> &OsStr {
     match operand {
@@ -127,7 +154,7 @@ impl Evaluator for TestEvaluator {
             UnaryOp::Readable => path(arg, &PathCondition::Readable),
             UnaryOp::NonEmpty => path(arg, &PathCondition::NonEmpty),
             UnaryOp::Socket => path(arg, &PathCondition::Socket),
-            UnaryOp::Tty => isatty(arg)?,
+            UnaryOp::Tty => isatty(arg, self.is_terminal)?,
             UnaryOp::UserIdFlag => path(arg, &PathCondition::UserIdFlag),
             UnaryOp::Writable => path(arg, &PathCondition::Writable),
             UnaryOp::Executable => path(arg, &PathCondition::Executable),
@@ -345,7 +372,7 @@ fn files(a: &OsStr, b: &OsStr, op: &OsStr) -> ParseResult<bool> {
     Ok(result)
 }
 
-fn isatty(fd: &OsStr) -> ParseResult<bool> {
+fn isatty(fd: &OsStr, is_terminal: fn(i32) -> bool) -> ParseResult<bool> {
     let value = Integer::parse(fd).ok_or_else(|| {
         ParseError::at_value(
             ParseErrorKind::InvalidFileDescriptor(fd.quote().to_string()),
@@ -367,7 +394,7 @@ fn isatty(fd: &OsStr) -> ParseResult<bool> {
         }
         descriptor as i32
     };
-    Ok(fd_is_terminal(descriptor))
+    Ok(is_terminal(descriptor))
 }
 
 #[cfg(not(windows))]

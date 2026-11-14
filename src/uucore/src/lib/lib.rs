@@ -493,8 +493,13 @@ pub fn args_os_filtered() -> impl Iterator<Item = OsString> {
 
 /// Read a line from stdin and check whether the first character is `'y'` or `'Y'`
 pub fn read_yes() -> bool {
+    read_yes_from(&mut std::io::stdin().lock())
+}
+
+/// Like [`read_yes`], reading the line from `input` instead of stdin.
+pub fn read_yes_from(input: &mut dyn BufRead) -> bool {
     let mut s = String::new();
-    std::io::stdin().read_line(&mut s).is_ok() && matches!(s.chars().next(), Some('y' | 'Y'))
+    input.read_line(&mut s).is_ok() && matches!(s.chars().next(), Some('y' | 'Y'))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -655,6 +660,25 @@ pub fn read_os_string_lines<R: std::io::Read>(
 #[macro_export]
 macro_rules! prompt_yes(
     ($($args:tt)+) => ({
+        $crate::__prompt!($($args)+);
+        uucore::read_yes()
+    })
+);
+
+/// Like [`prompt_yes`], reading the answer from `streams`, a [`io::Streams`].
+#[macro_export]
+macro_rules! prompt_yes_on(
+    ($streams:expr, $($args:tt)+) => ({
+        $crate::__prompt!($($args)+);
+        $streams.read_yes()
+    })
+);
+
+/// Writes the prompt of [`prompt_yes`] to stderr.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __prompt(
+    ($($args:tt)+) => ({
         use std::io::Write;
         eprint!("{}: ", uucore::util_name());
         eprint!($($args)+);
@@ -663,7 +687,6 @@ macro_rules! prompt_yes(
             $crate::error::USimpleError::new(1, err.to_string())
         });
         uucore::show_if_err!(res);
-        uucore::read_yes()
     })
 );
 

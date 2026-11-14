@@ -14,6 +14,7 @@ use crate::checksum::{
     AlgoKind, ChecksumError, ReadingMode, SizedAlgoKind, digest_reader, escape_filename,
 };
 use crate::error::{FromIo, UResult, USimpleError};
+use crate::io::Streams;
 use crate::line_ending::LineEnding;
 use crate::quoting_style::locale_aware_shell_escape;
 use crate::sum::DigestOutput;
@@ -219,15 +220,15 @@ fn write_untagged_checksum(
 ///
 /// # Arguments
 ///
+/// * `streams` - The streams `-` is read from and the checksums are written to
 /// * `options` - CLI options for the assigning checksum algorithm
 /// * `files` - A iterator of [`OsStr`] which is a bunch of files that are using for calculating checksum
-pub fn perform_checksum_computation<'a, W, I>(
-    mut w: W,
+pub fn perform_checksum_computation<'a, I>(
+    streams: &mut Streams,
     options: ChecksumComputeOptions,
     files: I,
 ) -> UResult<()>
 where
-    W: io::Write,
     I: Iterator<Item = &'a OsStr>,
 {
     let mut files = files.peekable();
@@ -238,15 +239,11 @@ where
             return Err(Box::new(ChecksumError::RawMultipleFiles));
         }
 
-        let stdin_buf;
-        let file_buf;
-
         // Handle the file input
         let mut file = io::BufReader::with_capacity(
             READ_BUFFER_SIZE,
             if filename == "-" {
-                stdin_buf = io::stdin();
-                Box::new(stdin_buf) as Box<dyn io::Read>
+                streams.take_stdin()
             } else {
                 let filepath = Path::new(filename);
                 if filepath.is_dir() {
@@ -259,7 +256,7 @@ where
                     ));
                     continue;
                 }
-                file_buf = match File::open(filepath) {
+                let file = match File::open(filepath) {
                     Ok(file) => {
                         #[cfg(any(
                             target_os = "linux",
@@ -274,11 +271,12 @@ where
                         continue;
                     }
                 };
-                Box::new(file_buf) as Box<dyn io::Read>
+                Box::new(file) as Box<dyn io::Read>
             },
         );
 
         let mut digest = options.algo_kind.create_digest();
+        let mut w = streams.stdout();
 
         // Always compute the "binary" version of the digest, i.e. on Windows,
         // never handle CRLFs specifically.
@@ -332,6 +330,6 @@ where
     }
 
     // The drop of the writer ignores a flush error.
-    w.flush().map_err(ChecksumError::Write)?;
+    streams.stdout().flush().map_err(ChecksumError::Write)?;
     Ok(())
 }

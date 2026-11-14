@@ -19,6 +19,7 @@ use crate::filenames::{FilenameIterator, Suffix, SuffixError};
 use crate::platform::Writer;
 use crate::strategy::{NumberType, Strategy, StrategyError};
 use clap::{ArgMatches, parser::ValueSource};
+use std::cell::{RefCell, RefMut};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, metadata};
 use std::io;
@@ -31,13 +32,51 @@ use uucore::translate;
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let settings = settings(args)?;
+
+    // When using --filter, we write to a child process's stdin which may
+    // close early. Disable SIGPIPE so we get EPIPE errors instead of
+    // being terminated, allowing graceful handling of broken pipes.
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    if settings.filter.is_some() {
+        let _ = uucore::signals::disable_pipe_errors();
+    }
+
+    split(&settings, Box::new(stdin()))
+}
+
+/// Runs split like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let mut settings = settings(args)?;
+    // run with a caller's streams, there is no shell to run a filter command with.
+    if settings.filter.is_some() {
+        return Err(USimpleError::new(
+            1,
+            translate!("split-error-filter-isolated"),
+        ));
+    }
+
+    settings.stdout = Some(RefCell::default());
+    let result = split(&settings, stdin);
+    if let Some(out) = settings.stdout.take() {
+        stdout.write_all(&out.into_inner())?;
+    }
+    result
+}
+
+/// Parses the arguments into the settings split runs with.
+fn settings(args: impl uucore::Args) -> UResult<Settings> {
     let raw_args: Vec<OsString> = args.collect();
     // Capture before the obsolete `-22` spelling is rewritten to `-l 22`.
     let diag_args = uucore::diagnostics::capture(&raw_args);
     let (args, obs_lines) = handle_obsolete(raw_args.into_iter());
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
-    let settings = Settings::from(&matches, obs_lines.as_deref()).map_err(|e| {
+    Settings::from(&matches, obs_lines.as_deref()).map_err(|e| {
         let message = format!("{e}");
         if e.requires_usage() {
             return UUsageError::new(1, message);
@@ -52,17 +91,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 _ => false,
             },
         )
-    })?;
-
-    // When using --filter, we write to a child process's stdin which may
-    // close early. Disable SIGPIPE so we get EPIPE errors instead of
-    // being terminated, allowing graceful handling of broken pipes.
-    #[cfg(all(unix, not(target_os = "fuchsia")))]
-    if settings.filter.is_some() {
-        let _ = uucore::signals::disable_pipe_errors();
-    }
-
-    split(&settings)
+    })
 }
 
 /// Extract obsolete shorthand (if any) for specifying lines in following scenarios (and similar)
@@ -255,6 +284,31 @@ struct Settings {
     /// created.
     elide_empty_files: bool,
     io_blksize: Option<u64>,
+    /// When given, what split prints is collected here for a caller's stdout instead of written
+    /// to the process's.
+    stdout: Option<RefCell<Vec<u8>>>,
+}
+
+/// Where split prints: the process's stdout, or the output collected for a caller's.
+enum Stdout<'a> {
+    Process(io::StdoutLock<'static>),
+    Given(RefMut<'a, Vec<u8>>),
+}
+
+impl Write for Stdout<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Process(out) => out.write(buf),
+            Self::Given(out) => out.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Process(out) => out.flush(),
+            Self::Given(out) => out.flush(),
+        }
+    }
 }
 
 /// An error when parsing settings from command-line arguments.
@@ -350,6 +404,7 @@ impl Settings {
             separator,
             elide_empty_files: matches.get_flag(options::ELIDE_EMPTY_FILES),
             io_blksize,
+            stdout: None,
         };
 
         #[cfg(windows)]
@@ -374,6 +429,13 @@ impl Settings {
         }
 
         Ok(result)
+    }
+
+    fn stdout(&self) -> Stdout<'_> {
+        match &self.stdout {
+            Some(out) => Stdout::Given(out.borrow_mut()),
+            None => Stdout::Process(io::stdout().lock()),
+        }
     }
 
     fn instantiate_current_writer(&self, filename: &OsStr, is_new: bool) -> io::Result<Writer> {
@@ -482,16 +544,28 @@ fn get_input_size(
             spooled: None,
         })
     } else if input == "-" {
+        // wasi has no temporary directory: std::env::temp_dir() panics there, so
+        // the rest of the stream is kept in memory instead of spooled.
+        #[cfg(target_os = "wasi")]
+        {
+            Ok(InputSize {
+                size: num_bytes + reader.read_to_end(buf)? as u64,
+                spooled: None,
+            })
+        }
         // STDIN stream that did not fit into the buffer. Spool it so the
         // size-dependent --number strategies can read it again.
-        let mut spooled = tempfile::tempfile()?;
-        spooled.write_all(buf)?;
-        let size = num_bytes + io::copy(reader, &mut spooled)?;
-        spooled.seek(SeekFrom::Start(0))?;
-        Ok(InputSize {
-            size,
-            spooled: Some(spooled),
-        })
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let mut spooled = tempfile::tempfile()?;
+            spooled.write_all(buf)?;
+            let size = num_bytes + io::copy(reader, &mut spooled)?;
+            spooled.seek(SeekFrom::Start(0))?;
+            Ok(InputSize {
+                size,
+                spooled: Some(spooled),
+            })
+        }
     } else {
         // Could be that file size is larger than set read limit
         // Get the file size from filesystem metadata
@@ -577,7 +651,7 @@ impl<'a> ByteChunkWriter<'a> {
             USimpleError::new(1, translate!("split-error-output-file-suffixes-exhausted"))
         })?;
         if settings.verbose {
-            print_creating_file(&filename)?;
+            print_creating_file(&filename, settings)?;
         }
         let inner = settings.instantiate_current_writer(&filename, true)?;
         Ok(ByteChunkWriter {
@@ -656,7 +730,7 @@ impl ByteChunkWriter<'_> {
                         io::Error::other(translate!("split-error-output-file-suffixes-exhausted"))
                     })?;
                     if self.settings.verbose {
-                        print_creating_file(&filename)?;
+                        print_creating_file(&filename, self.settings)?;
                     }
                     self.inner = self.settings.instantiate_current_writer(&filename, true)?;
                     self.current_filename = filename;
@@ -754,7 +828,7 @@ impl<'a> LineChunkWriter<'a> {
             io::Error::other(translate!("split-error-output-file-suffixes-exhausted"))
         })?;
         if settings.verbose {
-            print_creating_file(&filename)?;
+            print_creating_file(&filename, settings)?;
         }
         settings.instantiate_current_writer(&filename, true)
     }
@@ -1012,7 +1086,7 @@ fn n_chunks_by_byte(
     }
 
     // In Kth chunk of N mode - we will write to stdout instead of to a file.
-    let mut stdout_writer = io::stdout().lock();
+    let mut stdout_writer = settings.stdout();
     // In N chunks mode - we will write to `num_chunks` files
     let mut out_files: OutFiles = OutFiles::new();
 
@@ -1135,7 +1209,7 @@ fn n_chunks_by_line(
     }
 
     // In Kth chunk of N mode - we will write to stdout instead of to a file.
-    let mut stdout_writer = io::stdout().lock();
+    let mut stdout_writer = settings.stdout();
     // In N chunks mode - we will write to `num_chunks` files
     let mut out_files: OutFiles = OutFiles::new();
 
@@ -1256,7 +1330,7 @@ fn n_chunks_by_line_round_robin(
     // todo: GNU is not buffered. So BufReader might wrong.
     let mut reader = BufReader::with_capacity(io_blksize, reader);
     // In Kth chunk of N mode - we will write to stdout instead of to a file.
-    let mut stdout_writer = io::stdout().lock();
+    let mut stdout_writer = settings.stdout();
     // In N chunks mode - we will write to `num_chunks` files
     let mut out_files: OutFiles = OutFiles::new();
 
@@ -1358,7 +1432,7 @@ fn line_bytes(
             USimpleError::new(1, translate!("split-error-output-file-suffixes-exhausted"))
         })?;
         if settings.verbose {
-            print_creating_file(&name)?;
+            print_creating_file(&name, settings)?;
         }
         Ok(settings.instantiate_current_writer(&name, true)?)
     };
@@ -1413,9 +1487,9 @@ fn line_bytes(
     Ok(())
 }
 
-fn split(settings: &Settings) -> UResult<()> {
+fn split(settings: &Settings, stdin: Box<dyn Read>) -> UResult<()> {
     let reader = if settings.input == "-" {
-        Box::new(stdin()) as Box<dyn Read>
+        stdin
     } else {
         let r = File::open(Path::new(&settings.input)).map_err_context(
             || translate!("split-error-cannot-open-for-reading", "file" => settings.input.quote()),
@@ -1489,9 +1563,9 @@ fn split(settings: &Settings) -> UResult<()> {
     }
 }
 
-fn print_creating_file(name: &OsString) -> io::Result<()> {
+fn print_creating_file(name: &OsString, settings: &Settings) -> io::Result<()> {
     writeln!(
-        io::stdout(),
+        settings.stdout(),
         "{}",
         translate!("split-creating-file", "file" => name.quote())
     )

@@ -100,20 +100,23 @@ fn standardize_nice_args(mut args: impl uucore::Args) -> impl uucore::Args {
     v.into_iter()
 }
 
-#[uucore::main]
-pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+/// What nice was asked to do: print the niceness, or run a command with the niceness adjusted.
+pub enum Invocation {
+    Print,
+    Run {
+        adjustment: i32,
+        argv: Vec<OsString>,
+    },
+}
+
+/// Parses the arguments of nice.
+pub fn parse(args: impl uucore::Args) -> UResult<Invocation> {
     let args = standardize_nice_args(args);
 
     let matches =
         uucore::clap_localization::handle_clap_result_with_exit_code(uu_app(), args, 125)?;
 
-    #[cfg(not(unix))]
-    let current_niceness = 0i32; // todo: what we can do?
-    #[cfg(unix)]
-    let current_niceness = rustix::process::getpriority_process(None)
-        .map_err(|e| uucore::error::USimpleError::new(125, format!("getpriority: {e}")))?;
-
-    let Some(mut cmd_iter) = matches.get_many::<OsString>(options::COMMAND) else {
+    let Some(argv) = matches.get_many::<OsString>(options::COMMAND) else {
         if matches.contains_id(options::ADJUSTMENT) {
             return Err(UUsageError::new(
                 125,
@@ -121,11 +124,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             ));
         }
 
-        writeln!(stdout(), "{current_niceness}")?;
-        return Ok(());
+        return Ok(Invocation::Print);
     };
 
-    #[cfg(any(unix, windows))]
     let adjustment = match matches.get_one::<String>(options::ADJUSTMENT) {
         None => 10,
         Some(nstr) => match nstr.parse::<i32>() {
@@ -141,6 +142,29 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         },
     };
 
+    Ok(Invocation::Run {
+        adjustment,
+        argv: argv.cloned().collect(),
+    })
+}
+
+#[uucore::main]
+pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let invocation = parse(args)?;
+
+    #[cfg(not(unix))]
+    let current_niceness = 0i32; // todo: what we can do?
+    #[cfg(unix)]
+    let current_niceness = rustix::process::getpriority_process(None)
+        .map_err(|e| uucore::error::USimpleError::new(125, format!("getpriority: {e}")))?;
+
+    let Invocation::Run { adjustment, argv } = invocation else {
+        writeln!(stdout(), "{current_niceness}")?;
+        return Ok(());
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let _ = adjustment;
     #[cfg(any(unix, windows))]
     let new_niceness = current_niceness.saturating_add(adjustment);
     // We can't use `show_warning` because that will panic if stderr
@@ -167,10 +191,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         19.. => IDLE_PRIORITY_CLASS,
     };
 
-    let cmd = cmd_iter.next().unwrap();
-    let args: Vec<&OsString> = cmd_iter.collect();
+    let cmd = &argv[0];
     let mut command = process::Command::new(cmd);
-    command.args(args);
+    command.args(&argv[1..]);
     #[cfg(unix)]
     let err = command.exec();
     #[cfg(windows)]

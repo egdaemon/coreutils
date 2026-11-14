@@ -24,6 +24,7 @@ split-error-suffix-too-small = the suffix length needs to be at least { $length 
 split-error-multi-character-separator = multi-character separator { $separator }
 split-error-multiple-separator-characters = multiple separator characters specified
 split-error-filter-with-kth-chunk = --filter does not process a chunk extracted to stdout
+split-error-filter-isolated = cannot run a filter command in isolation
 split-error-invalid-io-block-size = invalid IO block size: { $size }
 split-error-not-supported = --filter is currently not supported in this platform
 split-error-invalid-number-of-chunks = invalid number of chunks: { $chunks }

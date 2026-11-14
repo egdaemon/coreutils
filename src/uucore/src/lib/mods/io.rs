@@ -126,6 +126,66 @@ impl From<OwnedFileDescriptorOrHandle> for Stdio {
     }
 }
 
+/// The standard streams a utility prompts on and reports to: the process's own, or the ones its
+/// caller gives in their place.
+pub enum Streams<'a> {
+    Process(io::Stdout),
+    Given {
+        stdin: io::BufReader<Box<dyn io::Read>>,
+        stdout: &'a mut dyn io::Write,
+    },
+}
+
+impl<'a> Streams<'a> {
+    /// The process's own streams.
+    pub fn process() -> Self {
+        Self::Process(io::stdout())
+    }
+
+    /// The streams a caller gives, in place of the process's.
+    pub fn given(stdin: Box<dyn io::Read>, stdout: &'a mut dyn io::Write) -> Self {
+        Self::Given {
+            stdin: io::BufReader::new(stdin),
+            stdout,
+        }
+    }
+
+    /// Where the utility writes its output.
+    pub fn stdout(&mut self) -> &mut dyn io::Write {
+        match self {
+            Self::Process(stdout) => stdout,
+            Self::Given { stdout, .. } => *stdout,
+        }
+    }
+
+    /// Takes stdin as an owned reader. The process's stdin can be taken again and continues where
+    /// the last reader stopped; a caller's is read only once, and leaves an empty stdin behind.
+    pub fn take_stdin(&mut self) -> Box<dyn io::Read> {
+        match self {
+            Self::Process(_) => Box::new(io::stdin()),
+            Self::Given { stdin, .. } => Box::new(std::mem::replace(
+                stdin,
+                io::BufReader::new(Box::new(io::empty())),
+            )),
+        }
+    }
+
+    /// Whether stdin is a terminal. A caller's stdin never is.
+    pub fn stdin_is_terminal(&self) -> bool {
+        use io::IsTerminal;
+        matches!(self, Self::Process(_)) && io::stdin().is_terminal()
+    }
+
+    /// Reads a line of stdin and checks whether it starts with `'y'` or `'Y'`, see
+    /// [`crate::read_yes`].
+    pub fn read_yes(&mut self) -> bool {
+        match self {
+            Self::Process(_) => crate::read_yes(),
+            Self::Given { stdin, .. } => crate::read_yes_from(stdin),
+        }
+    }
+}
+
 /// Read and discard up to `n` bytes from `reader`, using a `buf_size` buffer.
 ///
 /// Returns the number of bytes actually read; a value less than `n` means the

@@ -6,14 +6,15 @@
 // spell-checker:ignore (ToDO) srcpath targetpath EEXIST renameat
 
 use clap::{Arg, ArgAction, Command};
-use std::io::{self, Write, stdout};
+use std::io::{self, Read, Write};
 use uucore::display::Quotable;
 use uucore::error::{UError, UIoError, UResult};
 
 use uucore::fs::replace_link;
 use uucore::fs::{make_path_relative_to, paths_refer_to_same_file};
+use uucore::io::Streams;
 use uucore::translate;
-use uucore::{format_usage, prompt_yes, show_error};
+use uucore::{format_usage, prompt_yes_on, show_error};
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -107,6 +108,23 @@ static ARG_FILES: &str = "files";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let (paths, settings) = parse(args)?;
+    exec(&paths[..], &settings, &mut Streams::process())?;
+    Ok(())
+}
+
+/// Runs ln like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let (paths, settings) = parse(args)?;
+    exec(&paths[..], &settings, &mut Streams::given(stdin, stdout))?;
+    Ok(())
+}
+
+fn parse(args: impl uucore::Args) -> UResult<(Vec<PathBuf>, Settings)> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     /* the list of files */
@@ -149,8 +167,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         verbose: matches.get_flag(options::VERBOSE),
     };
 
-    exec(&paths[..], &settings)?;
-    Ok(())
+    Ok((paths, settings))
 }
 
 pub fn uu_app() -> Command {
@@ -266,25 +283,25 @@ pub fn uu_app() -> Command {
         )
 }
 
-fn exec(files: &[PathBuf], settings: &Settings) -> LnResult<()> {
+fn exec(files: &[PathBuf], settings: &Settings, streams: &mut Streams) -> LnResult<()> {
     // Handle cases where we create links in a directory first.
     if let Some(ref target_path) = settings.target_dir {
         // 4th form: a directory is specified by -t.
-        return link_files_in_dir(files, target_path, settings);
+        return link_files_in_dir(files, target_path, settings, streams);
     }
 
     // if -T is specified we may have a wrong number of operands.
     match files.split_last().expect("clap rejects empty") {
         // the target directory is the current directory
         (_, []) if !settings.no_target_dir => {
-            link_files_in_dir(files, &PathBuf::from("."), settings)
+            link_files_in_dir(files, &PathBuf::from("."), settings, streams)
         }
         // create links in the last argument
         (last, rest) if !settings.no_target_dir && (rest.len() > 1 || last.is_dir()) => {
-            link_files_in_dir(rest, last, settings)
+            link_files_in_dir(rest, last, settings, streams)
         }
         (f0, []) => Err(LnError::MissingDestination(f0.clone())),
-        (last, [f]) => link(f, last, settings),
+        (last, [f]) => link_with(f, last, settings, streams),
         (extra, [_, _]) | (_, [_, _, extra, ..]) => Err(LnError::ExtraOperand(
             extra.into(),
             uucore::execution_phrase().to_string(),
@@ -293,7 +310,12 @@ fn exec(files: &[PathBuf], settings: &Settings) -> LnResult<()> {
 }
 
 #[allow(clippy::cognitive_complexity)]
-fn link_files_in_dir(files: &[PathBuf], target_dir: &Path, settings: &Settings) -> LnResult<()> {
+fn link_files_in_dir(
+    files: &[PathBuf],
+    target_dir: &Path,
+    settings: &Settings,
+    streams: &mut Streams,
+) -> LnResult<()> {
     if !target_dir.is_dir() {
         return Err(LnError::TargetIsNotADirectory(target_dir.to_owned()));
     }
@@ -318,7 +340,8 @@ fn link_files_in_dir(files: &[PathBuf], target_dir: &Path, settings: &Settings) 
             match settings.overwrite {
                 OverwriteMode::NoClobber => {}
                 OverwriteMode::Interactive => {
-                    if prompt_yes!(
+                    if prompt_yes_on!(
+                        streams,
                         "{}",
                         translate!("ln-prompt-replace", "file" => target_dir.quote())
                     ) {
@@ -348,7 +371,7 @@ fn link_files_in_dir(files: &[PathBuf], target_dir: &Path, settings: &Settings) 
                 translate!("ln-error-will-not-overwrite", "target" => targetpath.quote(), "source" => srcpath.quote())
             );
             all_successful = false;
-        } else if let Err(e) = link(srcpath, &targetpath, settings) {
+        } else if let Err(e) = link_with(srcpath, &targetpath, settings, streams) {
             // A declined prompt has nothing to report.
             if !matches!(e, LnError::SomeLinksFailed) {
                 show_error!("{e}");
@@ -396,8 +419,12 @@ fn is_same_entry(src: &Path, dst: &Path) -> bool {
 /// Create symlink to src at dst with the given settings
 ///
 /// This is made public to allow other apps to use `ln` as a library.
-#[allow(clippy::cognitive_complexity)]
 pub fn link(src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
+    link_with(src, dst, settings, &mut Streams::process())
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn link_with(src: &Path, dst: &Path, settings: &Settings, streams: &mut Streams) -> LnResult<()> {
     let mut backup_path = None;
     // Remove an existing destination only after a link attempt fails with EEXIST.
     let mut overwrite_on_conflict = false;
@@ -426,7 +453,11 @@ pub fn link(src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
         match settings.overwrite {
             OverwriteMode::NoClobber => {}
             OverwriteMode::Interactive => {
-                if !prompt_yes!("{}", translate!("ln-prompt-replace", "file" => dst.quote())) {
+                if !prompt_yes_on!(
+                    streams,
+                    "{}",
+                    translate!("ln-prompt-replace", "file" => dst.quote())
+                ) {
                     return Err(LnError::SomeLinksFailed);
                 }
 
@@ -516,7 +547,7 @@ pub fn link(src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
     }
 
     if settings.verbose {
-        let mut out = stdout();
+        let out = streams.stdout();
         // Like GNU, `->` marks a symbolic link and `=>` a hard link.
         let arrow = if settings.symbolic { "->" } else { "=>" };
         write!(out, "{} {arrow} {}", dst.quote(), source.quote())?;

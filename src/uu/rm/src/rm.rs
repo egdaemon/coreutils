@@ -12,7 +12,7 @@ use clap::{Arg, ArgAction, Command, parser::ValueSource};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Metadata};
-use std::io::{self, IsTerminal, Write, stdin};
+use std::io::{self, Read, Write};
 use std::ops::BitOr;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -23,10 +23,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError, strip_errno};
+use uucore::io::Streams;
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
 use uucore::quoting_style::{QuotingStyle, locale_aware_escape_name};
 use uucore::translate;
-use uucore::{format_usage, os_str_as_bytes, prompt_yes, show_error};
+use uucore::{format_usage, os_str_as_bytes, prompt_yes_on, show_error};
 
 mod platform;
 #[cfg(all(unix, not(target_os = "redox")))]
@@ -57,8 +58,8 @@ impl UError for RmError {}
 /// Write one verbose line to standard output, turning a write failure
 /// (e.g. a full device or a closed pipe) into an error instead of
 /// panicking like `println!` would.
-fn write_verbose_line(message: &str) -> UResult<()> {
-    writeln!(io::stdout().lock(), "{message}").map_err(|err| {
+fn write_verbose_line(streams: &mut Streams, message: &str) -> UResult<()> {
+    writeln!(streams.stdout(), "{message}").map_err(|err| {
         USimpleError::new(
             1,
             translate!("rm-error-standard-output", "error" => strip_errno(&err)),
@@ -68,23 +69,29 @@ fn write_verbose_line(message: &str) -> UResult<()> {
 }
 
 /// Helper function to print verbose message for removed file
-fn verbose_removed_file(path: &Path, options: &Options) -> UResult<()> {
+fn verbose_removed_file(path: &Path, options: &Options, streams: &mut Streams) -> UResult<()> {
     if options.verbose {
-        write_verbose_line(&translate!(
-            "rm-verbose-removed",
-            "file" => uucore::fs::normalize_path(path).quote()
-        ))?;
+        write_verbose_line(
+            streams,
+            &translate!(
+                "rm-verbose-removed",
+                "file" => uucore::fs::normalize_path(path).quote()
+            ),
+        )?;
     }
     Ok(())
 }
 
 /// Helper function to print verbose message for removed directory
-fn verbose_removed_directory(path: &Path, options: &Options) -> UResult<()> {
+fn verbose_removed_directory(path: &Path, options: &Options, streams: &mut Streams) -> UResult<()> {
     if options.verbose {
-        write_verbose_line(&translate!(
-            "rm-verbose-removed-directory",
-            "file" => uucore::fs::normalize_path(path).quote()
-        ))?;
+        write_verbose_line(
+            streams,
+            &translate!(
+                "rm-verbose-removed-directory",
+                "file" => uucore::fs::normalize_path(path).quote()
+            ),
+        )?;
     }
     Ok(())
 }
@@ -121,10 +128,10 @@ fn show_permission_denied_error(path: &Path) -> bool {
 }
 
 /// Helper function to remove a directory and handle results
-fn remove_dir_with_feedback(path: &Path, options: &Options) -> bool {
+fn remove_dir_with_feedback(path: &Path, options: &Options, streams: &mut Streams) -> bool {
     match fs::remove_dir(path) {
         Ok(_) => {
-            report_verbose_write_error(verbose_removed_directory(path, options));
+            report_verbose_write_error(verbose_removed_directory(path, options, streams));
             false
         }
         Err(e) => show_removal_error(e, path),
@@ -236,6 +243,20 @@ static ARG_FILES: &str = "files";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    rm_args(args, &mut Streams::process())
+}
+
+/// Runs rm like [`uumain`], on the caller's streams instead of the process's. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    rm_args(args, &mut Streams::given(stdin, stdout))
+}
+
+fn rm_args(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     let matches = uu_app()
         .try_get_matches_from(args.iter())
@@ -325,12 +346,12 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 "?"
             }
         );
-        if !prompt_yes!("{msg}") {
+        if !prompt_yes_on!(streams, "{msg}") {
             return Ok(());
         }
     }
 
-    if remove(&files, &options) || VERBOSE_WRITE_FAILED.load(Ordering::Relaxed) {
+    if remove_with(&files, &options, streams) || VERBOSE_WRITE_FAILED.load(Ordering::Relaxed) {
         return Err(1.into());
     }
 
@@ -556,6 +577,11 @@ fn count_files_in_directory(p: &Path) -> u64 {
 /// Behavior is determined by the `options` parameter, see [`Options`] for
 /// details.
 pub fn remove(files: &[&OsStr], options: &Options) -> bool {
+    remove_with(files, options, &mut Streams::process())
+}
+
+/// Like [`remove`], prompting on and reporting to `streams`.
+fn remove_with(files: &[&OsStr], options: &Options, streams: &mut Streams) -> bool {
     let mut had_err = false;
 
     // Check if any files actually exist before creating progress bar
@@ -587,11 +613,11 @@ pub fn remove(files: &[&OsStr], options: &Options) -> bool {
 
                 any_files_processed = true;
                 if metadata.is_dir() {
-                    handle_dir(file, options, progress_bar.as_ref())
+                    handle_dir(file, options, streams, progress_bar.as_ref())
                 } else if is_symlink_dir(&metadata) {
-                    remove_dir(file, options, progress_bar.as_ref())
+                    remove_dir(file, options, streams, progress_bar.as_ref())
                 } else {
-                    remove_file(file, options, progress_bar.as_ref())
+                    remove_file(file, options, streams, progress_bar.as_ref())
                 }
             }
 
@@ -664,6 +690,7 @@ fn is_writable_metadata(_metadata: &Metadata) -> bool {
 fn remove_dir_recursive(
     path: &Path,
     options: &Options,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
 ) -> bool {
     // Base case 1: this is a file or a symbolic link.
@@ -677,17 +704,17 @@ fn remove_dir_recursive(
         Err(e) => return show_removal_error(e, path),
     };
     if is_symlink_dir(&metadata) {
-        return remove_dir(path, options, progress_bar);
+        return remove_dir(path, options, streams, progress_bar);
     }
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return remove_file(path, options, progress_bar);
+        return remove_file(path, options, streams, progress_bar);
     }
 
     // Base case 2: this is a non-empty directory, but the user
     // doesn't want to descend into it.
     if options.interactive == InteractiveMode::Always
         && !is_dir_empty(path)
-        && !prompt_descend(path)
+        && !prompt_descend(path, streams)
     {
         return false;
     }
@@ -695,7 +722,7 @@ fn remove_dir_recursive(
     // Use secure traversal on Unix (except Redox) for all recursive directory removals
     #[cfg(all(unix, not(target_os = "redox")))]
     {
-        safe_remove_dir_recursive(path, options, progress_bar)
+        safe_remove_dir_recursive(path, options, streams, progress_bar)
     }
 
     // Fallback for non-Unix, Redox, or use fs::remove_dir_all for very long paths
@@ -727,7 +754,7 @@ fn remove_dir_recursive(
                         Err(_) => error = true,
                         Ok(entry) => {
                             let child_error =
-                                remove_dir_recursive(&entry.path(), options, progress_bar);
+                                remove_dir_recursive(&entry.path(), options, streams, progress_bar);
                             error = error || child_error;
                         }
                     }
@@ -736,7 +763,7 @@ fn remove_dir_recursive(
         }
 
         // Ask the user whether to remove the current directory.
-        if options.interactive == InteractiveMode::Always && !prompt_dir(path, options) {
+        if options.interactive == InteractiveMode::Always && !prompt_dir(path, options, streams) {
             return false;
         }
 
@@ -762,7 +789,7 @@ fn remove_dir_recursive(
                 // show another error message as we return from each level
                 // of the recursion.
             }
-            Ok(_) => report_verbose_write_error(verbose_removed_directory(path, options)),
+            Ok(_) => report_verbose_write_error(verbose_removed_directory(path, options, streams)),
         }
 
         error
@@ -810,7 +837,12 @@ fn show_preserve_root_error(path: &Path) {
     show_error!("{}", RmError::UseNoPreserveRoot);
 }
 
-fn handle_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>) -> bool {
+fn handle_dir(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    progress_bar: Option<&ProgressBar>,
+) -> bool {
     let mut had_err = false;
 
     let path = clean_trailing_slashes(path);
@@ -824,9 +856,9 @@ fn handle_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>
 
     let is_root = is_root_path(path);
     if options.recursive && (!is_root || !options.preserve_root) {
-        had_err = remove_dir_recursive(path, options, progress_bar);
+        had_err = remove_dir_recursive(path, options, streams, progress_bar);
     } else if options.dir && (!is_root || !options.preserve_root) {
-        had_err = remove_dir(path, options, progress_bar).bitor(had_err);
+        had_err = remove_dir(path, options, streams, progress_bar).bitor(had_err);
     } else if options.recursive {
         show_preserve_root_error(path);
         had_err = true;
@@ -844,9 +876,14 @@ fn handle_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>
 /// Remove the given directory, asking the user for permission if necessary.
 ///
 /// Returns true if it has encountered an error.
-fn remove_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>) -> bool {
+fn remove_dir(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    progress_bar: Option<&ProgressBar>,
+) -> bool {
     // Ask the user for permission.
-    if !prompt_dir(path, options) {
+    if !prompt_dir(path, options, streams) {
         return false;
     }
 
@@ -862,7 +899,7 @@ fn remove_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>
     // Use safe traversal on Unix (except Redox) for empty directory removal
     #[cfg(all(unix, not(target_os = "redox")))]
     {
-        if let Some(result) = safe_remove_empty_dir(path, options, progress_bar) {
+        if let Some(result) = safe_remove_empty_dir(path, options, streams, progress_bar) {
             return result;
         }
     }
@@ -873,11 +910,16 @@ fn remove_dir(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>
     }
 
     // Fallback method for non-Linux or when safe traversal is unavailable
-    remove_dir_with_feedback(path, options)
+    remove_dir_with_feedback(path, options, streams)
 }
 
-fn remove_file(path: &Path, options: &Options, progress_bar: Option<&ProgressBar>) -> bool {
-    if prompt_file(path, options) {
+fn remove_file(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    progress_bar: Option<&ProgressBar>,
+) -> bool {
+    if prompt_file(path, options, streams) {
         // Update progress bar before removing the file
         if let Some(pb) = progress_bar {
             pb.inc(1);
@@ -886,7 +928,7 @@ fn remove_file(path: &Path, options: &Options, progress_bar: Option<&ProgressBar
         // Use safe traversal on Unix (except Redox) for individual file removal
         #[cfg(all(unix, not(target_os = "redox")))]
         {
-            if let Some(result) = safe_remove_file(path, options, progress_bar) {
+            if let Some(result) = safe_remove_file(path, options, streams, progress_bar) {
                 return result;
             }
         }
@@ -894,7 +936,7 @@ fn remove_file(path: &Path, options: &Options, progress_bar: Option<&ProgressBar
         // Fallback method for non-Unix, Redox, or when safe traversal is unavailable
         match fs::remove_file(path) {
             Ok(_) => {
-                report_verbose_write_error(verbose_removed_file(path, options));
+                report_verbose_write_error(verbose_removed_file(path, options, streams));
             }
             Err(e) => {
                 if e.kind() == io::ErrorKind::PermissionDenied {
@@ -914,7 +956,7 @@ fn remove_file(path: &Path, options: &Options, progress_bar: Option<&ProgressBar
     false
 }
 
-fn prompt_dir(path: &Path, options: &Options) -> bool {
+fn prompt_dir(path: &Path, options: &Options, streams: &mut Streams) -> bool {
     // If interactive is Never we never want to send prompts
     if options.interactive == InteractiveMode::Never {
         return true;
@@ -923,13 +965,13 @@ fn prompt_dir(path: &Path, options: &Options) -> bool {
     // We can't use metadata.permissions.readonly for directories because it only works on files
     // So we have to handle whether a directory is writable manually
     if let Ok(metadata) = fs::metadata(path) {
-        handle_writable_directory(path, options, &metadata)
+        handle_writable_directory(path, options, streams, &metadata)
     } else {
         true
     }
 }
 
-fn prompt_file(path: &Path, options: &Options) -> bool {
+fn prompt_file(path: &Path, options: &Options, streams: &mut Streams) -> bool {
     // If interactive is Never we never want to send prompts
     if options.interactive == InteractiveMode::Never {
         return true;
@@ -941,30 +983,40 @@ fn prompt_file(path: &Path, options: &Options) -> bool {
 
     if metadata.is_symlink() {
         return options.interactive != InteractiveMode::Always
-            || prompt_yes!("remove symbolic link {}?", path.quote());
+            || prompt_yes_on!(streams, "remove symbolic link {}?", path.quote());
     }
 
     if options.interactive == InteractiveMode::Always && is_writable_metadata(&metadata) {
         return if metadata.len() == 0 {
-            prompt_yes!("remove regular empty file {}?", path.quote())
+            prompt_yes_on!(streams, "remove regular empty file {}?", path.quote())
         } else {
-            prompt_yes!("remove file {}?", path.quote())
+            prompt_yes_on!(streams, "remove file {}?", path.quote())
         };
     }
 
-    prompt_file_permission_readonly(path, options, &metadata)
+    prompt_file_permission_readonly(path, options, streams, &metadata)
 }
 
-fn prompt_file_permission_readonly(path: &Path, options: &Options, metadata: &Metadata) -> bool {
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+fn prompt_file_permission_readonly(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    metadata: &Metadata,
+) -> bool {
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || streams.stdin_is_terminal();
     match (stdin_ok, options.interactive) {
         (false, InteractiveMode::PromptProtected) => true,
         _ if is_writable_metadata(metadata) => true,
-        _ if metadata.len() == 0 => prompt_yes!(
+        _ if metadata.len() == 0 => prompt_yes_on!(
+            streams,
             "remove write-protected regular empty file {}?",
             path.quote()
         ),
-        _ => prompt_yes!("remove write-protected regular file {}?", path.quote()),
+        _ => prompt_yes_on!(
+            streams,
+            "remove write-protected regular file {}?",
+            path.quote()
+        ),
     }
 }
 
@@ -1038,8 +1090,13 @@ mod path_tests {
 // For directories finding if they are writable or not is a hassle. In Unix we can use the built-in rust crate to check mode bits. But other os don't have something similar afaik
 // Most cases are covered by keep eye out for edge cases
 #[cfg(unix)]
-fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata) -> bool {
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+fn handle_writable_directory(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    metadata: &Metadata,
+) -> bool {
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || streams.stdin_is_terminal();
     match (
         stdin_ok,
         is_readable_metadata(metadata),
@@ -1049,29 +1106,48 @@ fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata
         #[expect(clippy::match_same_arms)] // needs comment
         (false, _, _, InteractiveMode::PromptProtected) => true,
         (false, false, false, InteractiveMode::Never) => true, // Don't prompt when interactive is never
-        (_, false, false, _) => prompt_yes!(
+        (_, false, false, _) => prompt_yes_on!(
+            streams,
             "attempt removal of inaccessible directory {}?",
             path.quote()
         ),
-        (_, false, true, InteractiveMode::Always) => prompt_yes!(
+        (_, false, true, InteractiveMode::Always) => prompt_yes_on!(
+            streams,
             "attempt removal of inaccessible directory {}?",
             path.quote()
         ),
-        (_, true, false, _) => prompt_yes!("remove write-protected directory {}?", path.quote()),
-        (_, _, _, InteractiveMode::Always) => prompt_yes!("remove directory {}?", path.quote()),
+        (_, true, false, _) => prompt_yes_on!(
+            streams,
+            "remove write-protected directory {}?",
+            path.quote()
+        ),
+        (_, _, _, InteractiveMode::Always) => {
+            prompt_yes_on!(streams, "remove directory {}?", path.quote())
+        }
         (_, _, _, _) => true,
     }
 }
 
 // For Windows, metadata.permissions().readonly() checks FILE_ATTRIBUTE_READONLY
 #[cfg(windows)]
-fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata) -> bool {
+fn handle_writable_directory(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    metadata: &Metadata,
+) -> bool {
     let not_user_writable = metadata.permissions().readonly();
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
+    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || streams.stdin_is_terminal();
     match (stdin_ok, not_user_writable, options.interactive) {
         (false, _, InteractiveMode::PromptProtected) => true,
-        (_, true, _) => prompt_yes!("remove write-protected directory {}?", path.quote()),
-        (_, _, InteractiveMode::Always) => prompt_yes!("remove directory {}?", path.quote()),
+        (_, true, _) => prompt_yes_on!(
+            streams,
+            "remove write-protected directory {}?",
+            path.quote()
+        ),
+        (_, _, InteractiveMode::Always) => {
+            prompt_yes_on!(streams, "remove directory {}?", path.quote())
+        }
         (_, _, _) => true,
     }
 }
@@ -1079,9 +1155,14 @@ fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata
 // I have this here for completeness but it will always return "remove directory {}" because metadata.permissions().readonly() only works for file not directories
 #[cfg(not(windows))]
 #[cfg(not(unix))]
-fn handle_writable_directory(path: &Path, options: &Options, _metadata: &Metadata) -> bool {
+fn handle_writable_directory(
+    path: &Path,
+    options: &Options,
+    streams: &mut Streams,
+    _metadata: &Metadata,
+) -> bool {
     if options.interactive == InteractiveMode::Always {
-        prompt_yes!("remove directory {}?", path.quote())
+        prompt_yes_on!(streams, "remove directory {}?", path.quote())
     } else {
         true
     }
@@ -1121,8 +1202,8 @@ fn clean_trailing_slashes(path: &Path) -> &Path {
     path
 }
 
-fn prompt_descend(path: &Path) -> bool {
-    prompt_yes!("descend into directory {}?", path.quote())
+fn prompt_descend(path: &Path, streams: &mut Streams) -> bool {
+    prompt_yes_on!(streams, "descend into directory {}?", path.quote())
 }
 
 #[cfg(not(windows))]
