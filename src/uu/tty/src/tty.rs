@@ -8,8 +8,8 @@
 #![cfg(any(all(unix, not(target_os = "fuchsia")), windows, target_os = "wasi"))]
 
 use clap::{Arg, ArgAction, Command};
-use std::io::{IsTerminal, Write};
-use uucore::error::{UResult, set_exit_code, strip_errno};
+use std::io::{IsTerminal, Read, Write};
+use uucore::error::{UResult, USimpleError, set_exit_code, strip_errno};
 use uucore::{format_usage, show_error, translate};
 
 mod options {
@@ -79,6 +79,23 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     Ok(())
+}
+
+/// Runs tty like [`uumain`], isolated from the process's standard streams. A stdin given by the
+/// caller is never a terminal.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let matches = uucore::clap_localization::handle_clap_result_with_exit_code(uu_app(), args, 2)?;
+
+    if !matches.get_flag(options::SILENT) {
+        writeln!(stdout, "{}", translate!("tty-not-a-tty"))
+            .map_err(|e| USimpleError::new(3, strip_errno(&e)))?;
+    }
+
+    Err(1.into())
 }
 
 #[cfg(windows)]

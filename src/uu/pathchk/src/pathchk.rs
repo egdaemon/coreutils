@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use uucore::display::Quotable;
 use uucore::error::strip_errno;
 use uucore::error::{UResult, set_exit_code};
@@ -51,6 +51,20 @@ const FILENAME_MAX: usize = 255;
 
 #[uucore::main(no_signals)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    pathchk(args)
+}
+
+/// Runs pathchk like [`uumain`], isolated from the process's standard streams, which it does not
+/// use.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    _stdout: &mut dyn Write,
+) -> UResult<()> {
+    pathchk(args)
+}
+
+fn pathchk(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     // set working mode

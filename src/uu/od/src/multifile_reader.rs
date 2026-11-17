@@ -5,20 +5,26 @@
 
 // spell-checker:ignore (ToDO) multifile curr fnames fname xfrd fillloop mockstream
 
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 #[cfg(unix)]
 use std::io::{Seek, SeekFrom};
+use std::rc::Rc;
 
 use uucore::{display::Quotable, error::strip_errno, show_error, translate};
 
 /// Buffer size used when skipping bytes by reading and discarding them.
 const SKIP_BUFFER_SIZE: usize = 16 * 1024;
 
+/// A stdin a caller gives in place of the process's, shared by every `-` operand.
+pub type SharedStdin = Rc<RefCell<dyn io::Read>>;
+
 pub enum InputSource<'a> {
     FileName(&'a OsStr),
     Stdin,
+    Given(SharedStdin),
 }
 
 /// The file currently being read. A real `File` is kept as a concrete handle so
@@ -30,6 +36,7 @@ enum CurrentReader {
     Stdin(uucore::io::RawReader<rustix::fd::BorrowedFd<'static>>),
     #[cfg(not(any(unix, target_os = "wasi")))]
     Stdin(io::Stdin),
+    Given(SharedStdin),
 }
 
 impl io::Read for CurrentReader {
@@ -37,6 +44,7 @@ impl io::Read for CurrentReader {
         match self {
             Self::File(f) => f.read(buf),
             Self::Stdin(r) => r.read(buf),
+            Self::Given(r) => r.borrow_mut().read(buf),
         }
     }
 }
@@ -47,6 +55,7 @@ impl rustix::fd::AsFd for CurrentReader {
         match self {
             Self::File(f) => f.as_fd(),
             Self::Stdin(s) => s.0,
+            Self::Given(_) => unreachable!("skip_in_file reads a given stdin"),
         }
     }
 }
@@ -104,6 +113,10 @@ impl MultifileReader<'_> {
                     {
                         self.curr_file = Some(CurrentReader::Stdin(io::stdin()));
                     }
+                    break;
+                }
+                InputSource::Given(stdin) => {
+                    self.curr_file = Some(CurrentReader::Given(stdin));
                     break;
                 }
                 InputSource::FileName(fname) => {
@@ -195,15 +208,16 @@ fn skip_in_file(curr: &mut CurrentReader, n_skip: u64) -> io::Result<u64> {
         }
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    match uucore::pipes::discard_n_bytes(&curr, n_skip as usize) {
-        Ok(spliced) => Ok(n_skip - spliced as u64),
-        Err(spliced) => {
-            let read =
-                uucore::io::read_and_discard(curr, n_skip - spliced as u64, SKIP_BUFFER_SIZE)?;
-            Ok(n_skip - spliced as u64 - read)
-        }
+    if !matches!(curr, CurrentReader::Given(_)) {
+        return match uucore::pipes::discard_n_bytes(&curr, n_skip as usize) {
+            Ok(spliced) => Ok(n_skip - spliced as u64),
+            Err(spliced) => {
+                let read =
+                    uucore::io::read_and_discard(curr, n_skip - spliced as u64, SKIP_BUFFER_SIZE)?;
+                Ok(n_skip - spliced as u64 - read)
+            }
+        };
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     Ok(n_skip - uucore::io::read_and_discard(curr, n_skip, SKIP_BUFFER_SIZE)?)
 }
 

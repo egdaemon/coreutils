@@ -71,13 +71,17 @@ fn replace_output_file_in_input_files(
 
 /// Open the merge input `file`. `copy` is the copy of the output file returned by
 /// [`replace_output_file_in_input_files`].
-fn open_input(file: &OsStr, copy: Option<&TmpPath>) -> UResult<Box<dyn Read + Send>> {
+fn open_input(
+    file: &OsStr,
+    copy: Option<&TmpPath>,
+    settings: &GlobalSettings,
+) -> UResult<Box<dyn Read + Send>> {
     match copy {
         Some(copy) if Path::new(file) == copy.path() => Ok(Box::new(
             copy.open()
                 .map_err(|error| SortError::OpenTmpFileFailed { error })?,
         )),
-        _ => open(file),
+        _ => open(file, &settings.stdin),
     }
 }
 
@@ -115,13 +119,13 @@ fn effective_merge_batch_size(settings: &GlobalSettings) -> usize {
 pub fn merge(
     files: &mut [OsString],
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
     tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     let copy = replace_output_file_in_input_files(files, output.as_output_name(), tmp_dir)?;
-    let files = files
-        .iter()
-        .map(|file| open_input(file, copy.as_ref()).map(|inner| PlainMergeInput { inner }));
+    let files = files.iter().map(|file| {
+        open_input(file, copy.as_ref(), settings).map(|inner| PlainMergeInput { inner })
+    });
     if settings.compress_prog.is_none() {
         merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
     } else {
@@ -137,7 +141,7 @@ pub fn merge_with_file_limit<
 >(
     mut files: F,
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
     tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     let batch_size = effective_merge_batch_size(settings);
@@ -346,7 +350,7 @@ struct FileMerger<'a> {
 
 impl FileMerger<'_> {
     /// Write the merged contents to the output file.
-    fn write_all(self, settings: &GlobalSettings, output: Output) -> UResult<()> {
+    fn write_all(self, settings: &GlobalSettings, output: Output<'_>) -> UResult<()> {
         let ctx = output.write_failed_context();
         let mut out = output.into_write()?;
         self.write_all_to(settings, &mut out, &ctx)?;
@@ -714,7 +718,7 @@ mod tests {
         fs::rename(tmp, dir.path().join("moved")).unwrap();
         std::os::unix::fs::symlink(other.path(), tmp).unwrap();
 
-        assert!(open_input(&files[0], copy.as_ref()).is_err());
+        assert!(open_input(&files[0], copy.as_ref(), &GlobalSettings::default()).is_err());
     }
 
     /// A temporary file that is being merged when the directory's path is made

@@ -3,52 +3,53 @@
 Commands `execveatinit`/`execveatwait` run (see `execveat.rs`), out of the utilities built for wasm
 (`feat_wasm`). A command not listed in `process.rs` returns `ErrNotFound`.
 
-Supported commands run through their `uumain_with` once stdin is exhausted, except those that stream,
-which write their output as each chunk of stdin arrives.
+Supported commands run through their `uumain_with` once stdin is exhausted, except those that stream:
+they write their output as each chunk of stdin arrives, or without stdin, a chunk each time the last
+was read. A command whose reader is gone exits with 141, as if SIGPIPE killed it.
 
 | command   | supported    | reason |
 |-----------|--------------|--------|
 | arch      | yes          |        |
-| b2sum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| b2sum     | yes          |        |
 | base32    | yes          |        |
 | base64    | yes          |        |
 | basename  | yes          |        |
 | basenc    | yes          |        |
-| cat       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
-| cksum     | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| cat       | yes          |        |
+| cksum     | yes          |        |
 | comm      | yes          |        |
-| cp        | no           | interactive prompts read stdin |
+| cp        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | csplit    | yes          |        |
-| cut       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| cut       | yes          |        |
 | date      | yes          |        |
-| dd        | no           | operates on file descriptors directly |
-| dir       | no           | layout and colour depend on the terminal |
+| dd        | yes          | its statistics go to the reactor's stderr |
+| dir       | yes          | columns are 80 wide unless `-w` or `COLUMNS` says otherwise, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
 | dircolors | yes          |        |
 | dirname   | yes          |        |
 | echo      | yes          |        |
 | expand    | yes          |        |
 | expr      | yes          |        |
 | factor    | yes          |        |
-| false     | no           | shell builtin |
+| false     | yes          |        |
 | fmt       | yes          |        |
 | fold      | yes          |        |
-| head      | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| head      | yes, streams | `-n N` and `-c N` on stdin stream and finish once they took their prefix; the rest run once stdin is exhausted |
 | hostid    | yes          |        |
 | join      | yes          |        |
 | link      | yes          |        |
-| ln        | no           | not ported yet |
-| ls        | no           | layout and colour depend on the terminal |
-| md5sum    | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
+| ln        | yes          | `-i` reads its answers from stdin |
+| ls        | yes          | one entry per line by default, `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal; `-C` and `-x` are 80 columns wide unless `-w` or `COLUMNS` says otherwise |
+| md5sum    | yes          |        |
 | mkdir     | yes          |        |
 | mktemp    | yes          |        |
-| mv        | no           | interactive prompts read stdin |
-| nice      | no           | runs another program |
+| mv        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
+| nice      | yes          | runs only a command the reactor runs through `uumain_with`, at niceness 0 |
 | nl        | yes          |        |
 | nproc     | yes          |        |
-| numfmt    | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
-| od        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| numfmt    | yes          |        |
+| od        | yes          |        |
 | paste     | yes          |        |
-| pathchk   | no           | not ported yet |
+| pathchk   | yes          |        |
 | pr        | yes          |        |
 | printenv  | yes          |        |
 | printf    | yes          |        |
@@ -56,34 +57,34 @@ which write their output as each chunk of stdin arrives.
 | pwd       | yes          |        |
 | readlink  | yes          |        |
 | realpath  | yes          |        |
-| rm        | no           | interactive prompts read stdin |
+| rm        | yes          | prompts read their answers from stdin, which must already hold them; the prompt itself goes to the reactor's stderr |
 | rmdir     | yes          |        |
 | seq       | yes          |        |
-| sha1sum   | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha224sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha256sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha384sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| sha512sum | no           | not ported yet, stdin/stdout are used deep in uucore's checksum module |
-| shred     | no           | operates on file descriptors directly |
+| sha1sum   | yes          |        |
+| sha224sum | yes          |        |
+| sha256sum | yes          |        |
+| sha384sum | yes          |        |
+| sha512sum | yes          |        |
+| shred     | yes          | `-` fails: the caller's stdout is a stream, not a file to overwrite |
 | shuf      | yes          |        |
 | sleep     | yes          |        |
-| sort      | no           | `--compress-program` runs another program |
-| split     | no           | `--filter` runs another program |
+| sort      | yes          | `--compress-program` fails: there are no other programs; `-c` and `-m` fail on wasi: they read on threads |
+| split     | yes          | `--filter` fails: there are no other programs |
 | sum       | yes          |        |
 | tac       | yes          |        |
-| tail      | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| tail      | yes          | `-f` and `-F` fail: a process can not wait for more input |
 | tee       | yes, streams |        |
-| test      | no           | shell builtin; `-t` needs `isatty` |
-| touch     | no           | not ported yet |
+| test      | yes          | `-t` is false: a process has no terminal |
+| touch     | yes          | `-` fails: stdout is the guest's socket |
 | tr        | yes          |        |
-| true      | no           | shell builtin |
+| true      | yes          |        |
 | truncate  | yes          |        |
 | tsort     | yes          |        |
-| tty       | no           | needs a terminal |
+| tty       | yes          | not a tty: a process has no terminal |
 | uname     | yes          |        |
 | unexpand  | yes          |        |
 | uniq      | yes          |        |
 | unlink    | yes          |        |
-| vdir      | no           | layout and colour depend on the terminal |
-| wc        | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
-| yes       | no           | fast paths need a real file descriptor (splice, `AsFd`, terminal checks) |
+| vdir      | yes          | `--color=auto`, `--classify=auto` and `--hyperlink=auto` see no terminal |
+| wc        | yes          |        |
+| yes       | yes, streams | writes a chunk each time the last was read; ends with 141, as from SIGPIPE, once its reader is gone |

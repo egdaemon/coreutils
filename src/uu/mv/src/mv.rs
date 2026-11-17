@@ -28,7 +28,7 @@ use rustc_hash::FxHashSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io;
 #[cfg(unix)]
 use std::os::unix;
 #[cfg(unix)]
@@ -66,8 +66,9 @@ use uucore::update_control;
 
 // These are exposed for projects (e.g. nushell) that want to create an `Options` value, which
 // requires these enums
+use uucore::io::Streams;
 pub use uucore::{backup_control::BackupMode, update_control::UpdateMode};
-use uucore::{format_usage, prompt_yes, show};
+use uucore::{format_usage, prompt_yes_on, show};
 
 use crate::error::MvError;
 
@@ -171,6 +172,20 @@ static OPT_EXCHANGE: &str = "exchange";
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    mv_args(args, &mut Streams::process())
+}
+
+/// Runs mv like [`uumain`], on the caller's streams instead of the process's. Prompts read their
+/// answers from `stdin`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn io::Read>,
+    stdout: &mut dyn io::Write,
+) -> UResult<()> {
+    mv_args(args, &mut Streams::given(stdin, stdout))
+}
+
+fn mv_args(args: impl uucore::Args, streams: &mut Streams) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let files: Vec<OsString> = matches
@@ -239,7 +254,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         exchange: matches.get_flag(OPT_EXCHANGE),
     };
 
-    mv(&files[..], &opts)
+    mv_with(&files[..], &opts, streams)
 }
 
 pub fn uu_app() -> Command {
@@ -387,7 +402,12 @@ fn parse_paths(files: &[OsString], opts: &Options) -> Vec<PathBuf> {
     }
 }
 
-fn handle_two_paths(source: &Path, target: &Path, opts: &Options) -> UResult<()> {
+fn handle_two_paths(
+    source: &Path,
+    target: &Path,
+    opts: &Options,
+    streams: &mut Streams,
+) -> UResult<()> {
     // `mv` never follows a symlink source, so the guard must not either.
     if backup_would_destroy_source(source, target, &opts.suffix, opts.backup, false) {
         return Err(io::Error::new(
@@ -442,6 +462,7 @@ fn handle_two_paths(source: &Path, target: &Path, opts: &Options) -> UResult<()>
                     source,
                     target,
                     opts,
+                    streams,
                     None,
                     hardlink_params.0,
                     hardlink_params.1,
@@ -455,17 +476,17 @@ fn handle_two_paths(source: &Path, target: &Path, opts: &Options) -> UResult<()>
                 .into())
             }
         } else {
-            move_files_into_dir(&[source.to_path_buf()], target, opts)
+            move_files_into_dir(&[source.to_path_buf()], target, opts, streams)
         }
     } else if source_is_dir && target.symlink_metadata().is_ok() {
         match opts.overwrite {
             OverwriteMode::NoClobber => return Ok(()),
-            OverwriteMode::Interactive => prompt_overwrite(target, None)?,
+            OverwriteMode::Interactive => prompt_overwrite(target, None, streams)?,
             OverwriteMode::Force => {}
             OverwriteMode::Default => {
                 let (writable, mode) = is_writable(target);
-                if !writable && io::stdin().is_terminal() {
-                    prompt_overwrite(target, mode)?;
+                if !writable && streams.stdin_is_terminal() {
+                    prompt_overwrite(target, mode, streams)?;
                 }
             }
         }
@@ -486,6 +507,7 @@ fn handle_two_paths(source: &Path, target: &Path, opts: &Options) -> UResult<()>
             source,
             target,
             opts,
+            streams,
             None,
             hardlink_params.0,
             hardlink_params.1,
@@ -592,7 +614,7 @@ fn assert_not_same_file(
     Ok(())
 }
 
-fn handle_multiple_paths(paths: &[PathBuf], opts: &Options) -> UResult<()> {
+fn handle_multiple_paths(paths: &[PathBuf], opts: &Options, streams: &mut Streams) -> UResult<()> {
     if opts.no_target_dir {
         return Err(UUsageError::new(
             1,
@@ -602,18 +624,23 @@ fn handle_multiple_paths(paths: &[PathBuf], opts: &Options) -> UResult<()> {
     let target_dir = paths.last().unwrap();
     let sources = &paths[..paths.len() - 1];
 
-    move_files_into_dir(sources, target_dir, opts)
+    move_files_into_dir(sources, target_dir, opts, streams)
 }
 
 /// Execute the mv command. This moves 'source' to 'target', where
 /// 'target' is a directory. If 'target' does not exist, and source is a single
 /// file or directory, then 'source' will be renamed to 'target'.
 pub fn mv(files: &[OsString], opts: &Options) -> UResult<()> {
+    mv_with(files, opts, &mut Streams::process())
+}
+
+/// Like [`mv`], prompting on and reporting to `streams`.
+fn mv_with(files: &[OsString], opts: &Options, streams: &mut Streams) -> UResult<()> {
     let paths = parse_paths(files, opts);
 
     if opts.exchange {
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        return exchange_paths(&paths, opts);
+        return exchange_paths(&paths, opts, streams);
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         return Err(USimpleError::new(
             1,
@@ -622,12 +649,12 @@ pub fn mv(files: &[OsString], opts: &Options) -> UResult<()> {
     }
 
     if let Some(ref name) = opts.target_dir {
-        return move_files_into_dir(&paths, &PathBuf::from(name), opts);
+        return move_files_into_dir(&paths, &PathBuf::from(name), opts, streams);
     }
 
     match paths.as_slice() {
-        [path0, path1] => handle_two_paths(path0, path1, opts),
-        _ => handle_multiple_paths(&paths, opts),
+        [path0, path1] => handle_two_paths(path0, path1, opts, streams),
+        _ => handle_multiple_paths(&paths, opts, streams),
     }
 }
 
@@ -637,13 +664,13 @@ pub fn mv(files: &[OsString], opts: &Options) -> UResult<()> {
 /// each of the other operands is exchanged with the file of the same name
 /// inside that directory (matching GNU `mv --exchange a b c dir/`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn exchange_paths(paths: &[PathBuf], opts: &Options) -> UResult<()> {
+fn exchange_paths(paths: &[PathBuf], opts: &Options, streams: &mut Streams) -> UResult<()> {
     match paths {
         [] | [_] => Err(UUsageError::new(
             1,
             translate!("mv-error-exchange-two-operands"),
         )),
-        [from, to] => exchange_two_paths(from, to, opts),
+        [from, to] => exchange_two_paths(from, to, opts, streams),
         [sources @ .., target_dir] => {
             if !target_dir.is_dir() {
                 return Err(MvError::TargetNotADirectory(target_dir.quote().to_string()).into());
@@ -652,7 +679,7 @@ fn exchange_paths(paths: &[PathBuf], opts: &Options) -> UResult<()> {
                 let name = source
                     .file_name()
                     .ok_or_else(|| MvError::NoSuchFile(source.quote().to_string()))?;
-                exchange_two_paths(source, &target_dir.join(name), opts)?;
+                exchange_two_paths(source, &target_dir.join(name), opts, streams)?;
             }
             Ok(())
         }
@@ -661,7 +688,12 @@ fn exchange_paths(paths: &[PathBuf], opts: &Options) -> UResult<()> {
 
 /// Atomically exchange the two given paths (renameat2 `RENAME_EXCHANGE`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn exchange_two_paths(from: &Path, to: &Path, opts: &Options) -> UResult<()> {
+fn exchange_two_paths(
+    from: &Path,
+    to: &Path,
+    opts: &Options,
+    streams: &mut Streams,
+) -> UResult<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
 
     let canonicalize_or_absolute = |p: &Path| {
@@ -680,16 +712,23 @@ fn exchange_two_paths(from: &Path, to: &Path, opts: &Options) -> UResult<()> {
             || translate!("mv-error-cannot-move", "source" => from.quote(), "target" => to.quote()),
         )?;
     if opts.verbose {
-        println!(
+        writeln!(
+            streams.stdout(),
             "{}",
             translate!("mv-verbose-exchanged", "from" => from.quote(), "to" => to.quote())
-        );
+        )
+        .expect("failed printing to stdout");
     }
     Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)]
-fn move_files_into_dir(files: &[PathBuf], target_dir: &Path, options: &Options) -> UResult<()> {
+fn move_files_into_dir(
+    files: &[PathBuf],
+    target_dir: &Path,
+    options: &Options,
+    streams: &mut Streams,
+) -> UResult<()> {
     // remember the moved destinations for further usage
     let mut moved_destinations: FxHashSet<PathBuf> =
         FxHashSet::with_capacity_and_hasher(files.len(), rustc_hash::FxBuildHasher);
@@ -778,6 +817,7 @@ fn move_files_into_dir(files: &[PathBuf], target_dir: &Path, options: &Options) 
             sourcepath,
             &targetpath,
             options,
+            streams,
             display_manager.as_ref(),
             hardlink_params.0,
             hardlink_params.1,
@@ -806,6 +846,7 @@ fn rename(
     from: &Path,
     to: &Path,
     opts: &Options,
+    streams: &mut Streams,
     display_manager: Option<&MultiProgress>,
     #[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
     #[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
@@ -817,7 +858,12 @@ fn rename(
     if to.exists() {
         if opts.update == UpdateMode::None {
             if opts.debug {
-                println!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
+                writeln!(
+                    streams.stdout(),
+                    "{}",
+                    translate!("mv-debug-skipped", "target" => to.quote())
+                )
+                .expect("failed printing to stdout");
             }
             return Ok(());
         }
@@ -836,17 +882,22 @@ fn rename(
         match opts.overwrite {
             OverwriteMode::NoClobber => {
                 if opts.debug {
-                    println!("{}", translate!("mv-debug-skipped", "target" => to.quote()));
+                    writeln!(
+                        streams.stdout(),
+                        "{}",
+                        translate!("mv-debug-skipped", "target" => to.quote())
+                    )
+                    .expect("failed printing to stdout");
                 }
                 return Ok(());
             }
-            OverwriteMode::Interactive => prompt_overwrite(to, None)?,
+            OverwriteMode::Interactive => prompt_overwrite(to, None, streams)?,
             OverwriteMode::Force => {}
             OverwriteMode::Default => {
                 // GNU mv prompts when stdin is a TTY and target is not writable
                 let (writable, mode) = is_writable(to);
-                if !writable && io::stdin().is_terminal() {
-                    prompt_overwrite(to, mode)?;
+                if !writable && streams.stdin_is_terminal() {
+                    prompt_overwrite(to, mode, streams)?;
                 }
             }
         }
@@ -854,7 +905,7 @@ fn rename(
         backup_path = backup_control::get_backup_path(opts.backup, to, &opts.suffix);
         if let Some(ref backup_path) = backup_path {
             // For backup renames, we don't need to track hardlinks as we're just moving the existing file
-            rename_with_fallback(to, backup_path, display_manager, false, None, None)?;
+            rename_with_fallback(to, backup_path, display_manager, false, streams, None, None)?;
         }
     }
 
@@ -894,13 +945,14 @@ fn rename(
             to,
             display_manager,
             opts.verbose,
+            streams,
             hardlink_tracker,
             hardlink_scanner,
         )?;
     }
     #[cfg(not(unix))]
     {
-        rename_with_fallback(from, to, display_manager, opts.verbose, None, None)?;
+        rename_with_fallback(from, to, display_manager, opts.verbose, streams, None, None)?;
     }
 
     #[cfg(all(feature = "selinux", any(target_os = "linux", target_os = "android")))]
@@ -917,11 +969,10 @@ fn rename(
         };
 
         match display_manager {
-            Some(pb) => pb.suspend(|| {
-                println!("{message}");
-            }),
-            None => println!("{message}"),
+            Some(pb) => pb.suspend(|| writeln!(streams.stdout(), "{message}")),
+            None => writeln!(streams.stdout(), "{message}"),
         }
+        .expect("failed printing to stdout");
     }
     Ok(())
 }
@@ -965,6 +1016,7 @@ fn rename_with_fallback(
     to: &Path,
     display_manager: Option<&MultiProgress>,
     verbose: bool,
+    streams: &mut Streams,
     #[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
     #[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
     #[cfg(not(unix))] _hardlink_tracker: Option<()>,
@@ -999,6 +1051,7 @@ fn rename_with_fallback(
                             to,
                             display_manager,
                             verbose,
+                            streams,
                             Some(tracker),
                             Some(scanner),
                         )
@@ -1007,7 +1060,7 @@ fn rename_with_fallback(
             }
             #[cfg(not(unix))]
             {
-                rename_dir_fallback(from, to, display_manager, verbose)
+                rename_dir_fallback(from, to, display_manager, verbose, streams)
             }
         } else if is_fifo(file_type) {
             rename_fifo_fallback(from, to)
@@ -1112,6 +1165,7 @@ fn rename_dir_fallback(
     to: &Path,
     display_manager: Option<&MultiProgress>,
     verbose: bool,
+    streams: &mut Streams,
     #[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
     #[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
 ) -> io::Result<()> {
@@ -1163,6 +1217,7 @@ fn rename_dir_fallback(
         #[cfg(unix)]
         hardlink_scanner,
         verbose,
+        streams,
         progress_bar.as_ref(),
         display_manager,
     );
@@ -1230,12 +1285,14 @@ fn get_dir_size(path: &Path) -> io::Result<u64> {
     Ok(size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_dir_contents(
     from: &Path,
     to: &Path,
     #[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
     #[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
     verbose: bool,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
     display_manager: Option<&MultiProgress>,
 ) -> io::Result<()> {
@@ -1254,6 +1311,7 @@ fn copy_dir_contents(
                 tracker,
                 scanner,
                 verbose,
+                streams,
                 progress_bar,
                 display_manager,
             )?;
@@ -1261,32 +1319,33 @@ fn copy_dir_contents(
     }
     #[cfg(not(unix))]
     {
-        copy_dir_contents_recursive(from, to, verbose, progress_bar, display_manager)?;
+        copy_dir_contents_recursive(from, to, verbose, streams, progress_bar, display_manager)?;
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_dir_contents_recursive(
     from_dir: &Path,
     to_dir: &Path,
     #[cfg(unix)] hardlink_tracker: &mut HardlinkTracker,
     #[cfg(unix)] hardlink_scanner: &HardlinkGroupScanner,
     verbose: bool,
+    streams: &mut Streams,
     progress_bar: Option<&ProgressBar>,
     display_manager: Option<&MultiProgress>,
 ) -> io::Result<()> {
     // Helper closure to print verbose messages
-    let print_verbose = |from: &Path, to: &Path| {
+    let print_verbose = |streams: &mut Streams, from: &Path, to: &Path| {
         if verbose {
             let message =
                 translate!("mv-verbose-renamed", "from" => from.quote(), "to" => to.quote());
             match display_manager {
-                Some(pb) => pb.suspend(|| {
-                    println!("{message}");
-                }),
-                None => println!("{message}"),
+                Some(pb) => pb.suspend(|| writeln!(streams.stdout(), "{message}")),
+                None => writeln!(streams.stdout(), "{message}"),
             }
+            .expect("failed printing to stdout");
         }
     };
 
@@ -1319,7 +1378,7 @@ fn copy_dir_contents_recursive(
                 rename_symlink_fallback(&from_path, &to_path)?;
             }
 
-            print_verbose(&from_path, &to_path);
+            print_verbose(streams, &from_path, &to_path);
         } else if from_path.is_dir() {
             // Recursively copy subdirectory (only real directories, not symlinks)
             create_dir_fail_closed(&to_path)?;
@@ -1330,7 +1389,7 @@ fn copy_dir_contents_recursive(
                 let _ = preserve_ownership(&from_path, &to_path);
             }
 
-            print_verbose(&from_path, &to_path);
+            print_verbose(streams, &from_path, &to_path);
 
             copy_dir_contents_recursive(
                 &from_path,
@@ -1340,6 +1399,7 @@ fn copy_dir_contents_recursive(
                 #[cfg(unix)]
                 hardlink_scanner,
                 verbose,
+                streams,
                 progress_bar,
                 display_manager,
             )?;
@@ -1360,7 +1420,7 @@ fn copy_dir_contents_recursive(
                 fs::copy(&from_path, &to_path)?;
             }
 
-            print_verbose(&from_path, &to_path);
+            print_verbose(streams, &from_path, &to_path);
         }
 
         if let Some(pb) = progress_bar
@@ -1636,8 +1696,8 @@ fn get_interactive_prompt(to: &Path, _cached_mode: Option<u32>) -> String {
 }
 
 /// Prompts the user for confirmation and returns an error if declined.
-fn prompt_overwrite(to: &Path, cached_mode: Option<u32>) -> io::Result<()> {
-    if !prompt_yes!("{}", get_interactive_prompt(to, cached_mode)) {
+fn prompt_overwrite(to: &Path, cached_mode: Option<u32>, streams: &mut Streams) -> io::Result<()> {
+    if !prompt_yes_on!(streams, "{}", get_interactive_prompt(to, cached_mode)) {
         return Err(io::Error::other(""));
     }
     Ok(())

@@ -19,7 +19,7 @@ use crate::options::{
 use crate::units::{Result, Unit};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValueSource};
 use std::ffi::OsString;
-use std::io::{BufRead, BufWriter, IsTerminal, Write, stderr};
+use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Read, Write, stderr};
 use std::str::FromStr;
 
 use uucore::display::Quotable;
@@ -122,9 +122,17 @@ fn with_stdout<T>(body: impl FnOnce(&mut dyn Write) -> UResult<T>) -> UResult<T>
         let mut writer = stdout.lock();
         finish(body(&mut writer), &mut writer)
     } else {
-        let mut writer = BufWriter::new(stdout.lock());
-        finish(body(&mut writer), &mut writer)
+        with_writer(&mut stdout.lock(), body)
     }
+}
+
+/// Run `body` with `stdout` buffered a block at a time, flushed before this returns.
+fn with_writer<T>(
+    stdout: &mut dyn Write,
+    body: impl FnOnce(&mut dyn Write) -> UResult<T>,
+) -> UResult<T> {
+    let mut writer = BufWriter::new(stdout);
+    finish(body(&mut writer), &mut writer)
 }
 
 /// Flush `writer`, keeping the failure `result` already carries, if any.
@@ -148,27 +156,34 @@ fn handle_args<'a>(
     options: &NumfmtOptions,
     snapshot: Option<&[OsString]>,
 ) -> UResult<bool> {
-    with_stdout(|stdout| {
-        let terminator = if options.zero_terminated { 0u8 } else { b'\n' };
-        let mut saw_invalid = false;
-        for (n, l) in args.enumerate() {
-            match format_and_write(stdout, l, options, Some(terminator)) {
-                Ok(invalid) => saw_invalid |= invalid,
-                // Only this mode stops on the first bad number; the others carry
-                // on, where a report per line would bury the output.
-                Err(error) => {
-                    return Err(uucore::diagnostics::error_after_report(
-                        snapshot,
-                        error,
-                        |args, error| {
-                            diagnostics::render_input(args, l, n, &error.to_string(), options)
-                        },
-                    ));
-                }
+    with_stdout(|stdout| write_args(args, options, snapshot, stdout))
+}
+
+fn write_args<'a>(
+    args: impl Iterator<Item = &'a [u8]>,
+    options: &NumfmtOptions,
+    snapshot: Option<&[OsString]>,
+    stdout: &mut dyn Write,
+) -> UResult<bool> {
+    let terminator = if options.zero_terminated { 0u8 } else { b'\n' };
+    let mut saw_invalid = false;
+    for (n, l) in args.enumerate() {
+        match format_and_write(stdout, l, options, Some(terminator)) {
+            Ok(invalid) => saw_invalid |= invalid,
+            // Only this mode stops on the first bad number; the others carry
+            // on, where a report per line would bury the output.
+            Err(error) => {
+                return Err(uucore::diagnostics::error_after_report(
+                    snapshot,
+                    error,
+                    |args, error| {
+                        diagnostics::render_input(args, l, n, &error.to_string(), options)
+                    },
+                ));
             }
         }
-        Ok(saw_invalid)
-    })
+    }
+    Ok(saw_invalid)
 }
 
 /// Process lines read from stdin.
@@ -477,6 +492,25 @@ fn print_debug_warnings(options: &NumfmtOptions, matches: &ArgMatches) {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    numfmt(args, None, None)
+}
+
+/// Runs numfmt like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    numfmt(args, Some(&mut *stdin), Some(stdout))
+}
+
+/// Runs numfmt, reading lines from `stdin` and writing to `stdout` in place of the process's
+/// streams when they are given.
+fn numfmt(
+    args: impl uucore::Args,
+    stdin: Option<&mut dyn Read>,
+    stdout: Option<&mut dyn Write>,
+) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in --format diagnostics.
     let format_args = uucore::diagnostics::capture(&args);
@@ -530,7 +564,21 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             .map(|s| os_str_as_bytes(s).map_err(|e| e.to_string()))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(NumfmtError::IllegalArgument)?;
-        handle_args(byte_args.into_iter(), &options, format_args.as_deref())
+        match stdout {
+            None => handle_args(byte_args.into_iter(), &options, format_args.as_deref()),
+            Some(stdout) => with_writer(stdout, |stdout| {
+                write_args(
+                    byte_args.into_iter(),
+                    &options,
+                    format_args.as_deref(),
+                    stdout,
+                )
+            }),
+        }
+    } else if let (Some(stdin), Some(stdout)) = (stdin, stdout) {
+        with_writer(stdout, |stdout| {
+            handle_buffer_to(BufReader::new(stdin), &options, stdout)
+        })
     } else {
         let stdin = std::io::stdin();
         handle_buffer(stdin.lock(), &options)

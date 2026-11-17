@@ -30,7 +30,7 @@ use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -207,6 +207,35 @@ fn shr2(s: &str) -> String {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let (files, opts) = parse(args)?;
+    touch(&files, &opts)?;
+    Ok(())
+}
+
+/// Runs touch like [`uumain`], isolated from the process's standard streams. `-` names the
+/// caller's stdout, which has no times to set, so touch stops there with an error.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    _stdout: &mut dyn Write,
+) -> UResult<()> {
+    let (files, opts) = parse(args)?;
+    let (files, stdout) = files.split_at(
+        files
+            .iter()
+            .position(|f| matches!(f, InputFile::Stdout))
+            .unwrap_or(files.len()),
+    );
+    touch(files, &opts)?;
+    if stdout.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::from(ErrorKind::Unsupported)
+        .map_err_context(|| translate!("touch-error-setting-times-of-path", "path" => "-".quote())))
+}
+
+fn parse(args: impl uucore::Args) -> UResult<(Vec<InputFile>, Options)> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
     let mut filenames: Vec<&OsString> = matches
@@ -268,9 +297,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         strict: false,
     };
 
-    touch(&files, &opts)?;
-
-    Ok(())
+    Ok((files, opts))
 }
 
 pub fn uu_app() -> Command {

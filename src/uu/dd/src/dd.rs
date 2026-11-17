@@ -44,13 +44,13 @@ use std::os::windows::{fs::MetadataExt, io::AsHandle};
 use std::path::Path;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, atomic::Ordering::Relaxed, mpsc};
+#[cfg(not(target_os = "wasi"))]
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Arg, Command};
 use num_integer::Integer;
 use uucore::display::Quotable;
-#[cfg(unix)]
 use uucore::error::USimpleError;
 use uucore::error::{FromIo, UResult, set_exit_code};
 use uucore::show_if_err;
@@ -99,13 +99,19 @@ impl Alarm {
     pub fn with_interval(interval: Duration) -> Self {
         let trigger = Arc::new(AtomicU8::default());
 
-        let weak_trigger = Arc::downgrade(&trigger);
-        thread::spawn(move || {
-            while let Some(trigger) = weak_trigger.upgrade() {
-                thread::sleep(interval);
-                trigger.store(ALARM_TRIGGER_TIMER, Relaxed);
-            }
-        });
+        // wasi has no threads, so the timer never fires there.
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let weak_trigger = Arc::downgrade(&trigger);
+            thread::spawn(move || {
+                while let Some(trigger) = weak_trigger.upgrade() {
+                    thread::sleep(interval);
+                    trigger.store(ALARM_TRIGGER_TIMER, Relaxed);
+                }
+            });
+        }
+        #[cfg(target_os = "wasi")]
+        let _ = interval;
 
         Self { trigger }
     }
@@ -225,6 +231,9 @@ enum Source {
     /// Input from a named pipe, also known as a FIFO.
     #[cfg(unix)]
     Fifo(File),
+
+    /// Input from the stdin a caller gives, see [`uumain_with`].
+    Given(Box<dyn Read>),
 }
 
 impl Source {
@@ -307,6 +316,16 @@ impl Source {
             Self::File(f) => f.seek(SeekFrom::Current(n.try_into().unwrap())),
             #[cfg(unix)]
             Self::Fifo(f) => uucore::io::read_and_discard(f, n, ibs),
+            Self::Given(stdin) => {
+                let m = uucore::io::read_and_discard(stdin, n, ibs)?;
+                if m < n {
+                    show_error!(
+                        "{}",
+                        translate!("dd-error-cannot-skip-offset", "file" => "standard input")
+                    );
+                }
+                Ok(m)
+            }
         }
     }
 
@@ -349,6 +368,7 @@ impl Read for Source {
             Self::StdinFile(f) => f.read(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.read(buf),
+            Self::Given(stdin) => stdin.read(buf),
         }
     }
 }
@@ -398,6 +418,22 @@ impl<'a> Input<'a> {
             ));
         }
 
+        if settings.skip > 0 {
+            src.skip(settings.skip, settings.ibs)?;
+        }
+        Ok(Self { src, settings })
+    }
+
+    /// Instantiate this struct with the stdin a caller gives as a source.
+    fn new_given(settings: &'a Settings, stdin: Box<dyn Read>) -> UResult<Self> {
+        if settings.iflags.directory {
+            return Err(USimpleError::new(
+                1,
+                translate!("dd-error-not-directory", "file" => "standard input"),
+            ));
+        }
+
+        let mut src = Source::Given(stdin);
         if settings.skip > 0 {
             src.skip(settings.skip, settings.ibs)?;
         }
@@ -595,7 +631,7 @@ enum Density {
 }
 
 /// Data destinations.
-enum Dest {
+enum Dest<'a> {
     /// Output to stdout.
     Stdout(File),
 
@@ -612,12 +648,16 @@ enum Dest {
     /// Output to nothing, dropping each byte written to the output.
     #[cfg(unix)]
     Sink,
+
+    /// Output to the stdout a caller gives, see [`uumain_with`].
+    Given(&'a mut dyn Write),
 }
 
-impl Dest {
+impl Dest<'_> {
     fn fsync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_all()
@@ -635,6 +675,7 @@ impl Dest {
     fn fdatasync(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => {
                 f.flush()?;
                 f.sync_data()
@@ -653,6 +694,7 @@ impl Dest {
     fn seek(&mut self, n: u64, obs: usize) -> io::Result<u64> {
         match self {
             Self::Stdout(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
+            Self::Given(stdout) => io::copy(&mut io::repeat(0).take(n), stdout),
             Self::File(f, _) => {
                 #[cfg(unix)]
                 if let Ok(Some(len)) = try_get_len_of_block_device(f)
@@ -775,7 +817,7 @@ fn handle_o_direct_write(
     Err(original_error)
 }
 
-impl Write for Dest {
+impl Write for Dest<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::File(f, Density::Sparse) if is_sparse(buf) => {
@@ -802,6 +844,7 @@ impl Write for Dest {
                 }
             }
             Self::Stdout(stdout) => stdout.write(buf),
+            Self::Given(stdout) => stdout.write(buf),
             #[cfg(unix)]
             Self::Fifo(f) => f.write(buf),
             #[cfg(unix)]
@@ -812,6 +855,7 @@ impl Write for Dest {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Stdout(stdout) => stdout.flush(),
+            Self::Given(stdout) => stdout.flush(),
             Self::File(f, _) => f.flush(),
             #[cfg(unix)]
             Self::Fifo(f) => f.flush(),
@@ -829,7 +873,7 @@ impl Write for Dest {
 /// `dd`.
 struct Output<'a> {
     /// The destination to which bytes will be written.
-    dst: Dest,
+    dst: Dest<'a>,
 
     /// Configuration settings for how to read and write the data.
     settings: &'a Settings,
@@ -840,6 +884,14 @@ impl<'a> Output<'a> {
     fn new_stdout(settings: &'a Settings) -> UResult<Self> {
         let fx = OwnedFileDescriptorOrHandle::from(io::stdout())?;
         let mut dst = Dest::Stdout(fx.into_file());
+        dst.seek(settings.seek, settings.obs)
+            .map_err_context(|| translate!("dd-error-write-error"))?;
+        Ok(Self { dst, settings })
+    }
+
+    /// Instantiate this struct with the stdout a caller gives as a destination.
+    fn new_given(settings: &'a Settings, stdout: &'a mut dyn Write) -> UResult<Self> {
+        let mut dst = Dest::Given(stdout);
         dst.seek(settings.seek, settings.obs)
             .map_err_context(|| translate!("dd-error-write-error"))?;
         Ok(Self { dst, settings })
@@ -1163,7 +1215,7 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
     // to the receives `rx`, and the receiver prints the transfer
     // information.
     let (prog_tx, rx) = mpsc::channel();
-    let output_thread = thread::spawn(gen_prog_updater(rx, i.settings.status));
+    let output_thread = reporter(gen_prog_updater(rx, i.settings.status));
 
     // Optimization: if no blocks are to be written, then don't
     // bother allocating any buffers.
@@ -1331,9 +1383,7 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
         // Flushing and syncing are pointless now, but the caller still wants the statistics.
         let prog_update = ProgUpdate::new(rstat, wstat, start.elapsed(), ProgUpdateType::Final);
         prog_tx.send(prog_update).unwrap_or(());
-        output_thread
-            .join()
-            .expect("Failed to join with the output thread.");
+        output_thread();
         return Err(e);
     }
 
@@ -1375,13 +1425,13 @@ fn write_to<'a>(
 }
 
 /// Flush output, print final stats, and join with the progress thread.
-fn finalize<T>(
+fn finalize(
     mut output: BlockWriter,
     rstat: ReadStat,
     wstat: WriteStat,
     start: Instant,
     prog_tx: &mpsc::Sender<ProgUpdate>,
-    output_thread: thread::JoinHandle<T>,
+    output_thread: impl FnOnce(),
 ) -> io::Result<()> {
     // Flush the output in case a partial write has been buffered but
     // not yet written.
@@ -1398,11 +1448,27 @@ fn finalize<T>(
     let prog_update = ProgUpdate::new(rstat, wstat, start.elapsed(), ProgUpdateType::Final);
     prog_tx.send(prog_update).unwrap_or(());
     // Wait for the output thread to finish
-    output_thread
-        .join()
-        .expect("Failed to join with the output thread.");
+    output_thread();
 
     Ok(())
+}
+
+/// Runs the progress updater on a thread of its own, returning the wait for it to finish.
+#[cfg(not(target_os = "wasi"))]
+fn reporter(updater: impl Fn() + Send + 'static) -> impl FnOnce() {
+    let thread = thread::spawn(updater);
+    move || {
+        thread
+            .join()
+            .expect("Failed to join with the output thread.");
+    }
+}
+
+/// wasi has no threads: the updater runs once the copy finishes, reporting the updates the copy
+/// queued on its channel.
+#[cfg(target_os = "wasi")]
+fn reporter(updater: impl Fn()) -> impl FnOnce() {
+    updater
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1603,6 +1669,26 @@ fn is_fifo(filename: &str) -> bool {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    dd(args, None, None)
+}
+
+/// Runs dd like [`uumain`], isolated from the process's standard streams: without `if=` or `of=`,
+/// it reads `stdin` and writes `stdout`.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    dd(args, Some(stdin), Some(stdout))
+}
+
+/// Runs dd, reading `stdin` and writing `stdout` in place of the process's streams when they are
+/// given.
+fn dd(
+    args: impl uucore::Args,
+    stdin: Option<Box<dyn Read>>,
+    stdout: Option<&mut dyn Write>,
+) -> UResult<()> {
     // The command line is kept for the caret in operand diagnostics.
     let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
         uu_app(),
@@ -1622,18 +1708,22 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         return Err(USimpleError::new(1, "write error"));
     }
 
-    let i = match settings.infile {
+    let i = match (&settings.infile, stdin) {
         #[cfg(unix)]
-        Some(ref infile) if is_fifo(infile) => Input::new_fifo(Path::new(&infile), &settings)?,
-        Some(ref infile) => Input::new_file(Path::new(&infile), &settings)?,
-        None => Input::new_stdin(&settings)?,
+        (Some(infile), _) if is_fifo(infile) => Input::new_fifo(Path::new(&infile), &settings)?,
+        (Some(infile), _) => Input::new_file(Path::new(&infile), &settings)?,
+        (None, Some(stdin)) => Input::new_given(&settings, stdin)?,
+        (None, None) => Input::new_stdin(&settings)?,
     };
-    let o = match settings.outfile {
+    let o = match (&settings.outfile, stdout) {
         #[cfg(unix)]
-        Some(ref outfile) if is_fifo(outfile) => Output::new_fifo(Path::new(&outfile), &settings)?,
-        Some(ref outfile) => Output::new_file(Path::new(&outfile), &settings)?,
-        None if is_stdout_redirected_to_seekable_file() => Output::new_file_from_stdout(&settings)?,
-        None => Output::new_stdout(&settings)?,
+        (Some(outfile), _) if is_fifo(outfile) => Output::new_fifo(Path::new(&outfile), &settings)?,
+        (Some(outfile), _) => Output::new_file(Path::new(&outfile), &settings)?,
+        (None, Some(stdout)) => Output::new_given(&settings, stdout)?,
+        (None, None) if is_stdout_redirected_to_seekable_file() => {
+            Output::new_file_from_stdout(&settings)?
+        }
+        (None, None) => Output::new_stdout(&settings)?,
     };
     dd_copy(i, o).map_err_context(|| translate!("dd-error-io-error"))
 }

@@ -22,7 +22,7 @@ use crate::{Line, Output};
 pub fn ext_sort(
     files: &mut impl Iterator<Item = UResult<Box<dyn Read + Send>>>,
     settings: &GlobalSettings,
-    output: Output,
+    output: Output<'_>,
     _tmp_dir: &mut TmpDirWrapper,
 ) -> UResult<()> {
     let separator = settings.line_ending.into();

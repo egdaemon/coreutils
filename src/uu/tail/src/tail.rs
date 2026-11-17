@@ -39,24 +39,81 @@ use uucore::{show, show_error};
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    match settings(args)? {
+        Some(settings) => uu_tail(&settings),
+        None => Ok(()),
+    }
+}
+
+/// Runs tail like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    match settings(args)? {
+        Some(settings) => tail_with(&settings, &mut *stdin, stdout),
+        None => Ok(()),
+    }
+}
+
+/// Parses and verifies the arguments, there are no settings when tail has nothing to output.
+fn settings(args: impl uucore::Args) -> UResult<Option<Settings>> {
     let settings = parse_args(args)?;
 
     settings.check_warnings()?;
 
     match settings.verify() {
-        args::VerificationResult::CannotFollowStdinByName => {
-            return Err(USimpleError::new(
-                1,
-                translate!("tail-error-cannot-follow-stdin-by-name", "stdin" => text::DASH.quote()),
-            ));
-        }
+        args::VerificationResult::CannotFollowStdinByName => Err(USimpleError::new(
+            1,
+            translate!("tail-error-cannot-follow-stdin-by-name", "stdin" => text::DASH.quote()),
+        )),
         // Exit early if we do not output anything. Note, that this may break a pipe
         // when tail is on the receiving side.
-        args::VerificationResult::NoOutput => return Ok(()),
-        args::VerificationResult::Ok => {}
+        args::VerificationResult::NoOutput => Ok(None),
+        args::VerificationResult::Ok => Ok(Some(settings)),
+    }
+}
+
+/// Runs tail over its inputs, reading `stdin` in place of the process's stdin and writing to
+/// `stdout`. Without the process's own file descriptors, files are read through instead of seeked,
+/// and nothing is followed.
+fn tail_with(settings: &Settings, stdin: &mut dyn Read, stdout: &mut dyn Write) -> UResult<()> {
+    if settings.follow.is_some() {
+        return Err(USimpleError::new(
+            1,
+            translate!("tail-error-cannot-follow-isolated"),
+        ));
     }
 
-    uu_tail(&settings)
+    let mut printer = HeaderPrinter::new(settings.verbose, true);
+    for input in &settings.inputs {
+        match input.kind() {
+            InputKind::Stdin => {
+                printer.write_input(input, stdout)?;
+                unbounded_tail(&mut BufReader::new(&mut *stdin), settings, stdout)?;
+            }
+            InputKind::File(path) if path.is_dir() => {
+                set_exit_code(1);
+                printer.write_input(input, stdout)?;
+                show_error!(
+                    "{}",
+                    translate_text!("tail-error-reading-file", "file" => input.display_name, "error" => translate!("tail-is-a-directory"))
+                );
+            }
+            InputKind::File(path) => match File::open(path) {
+                Ok(file) => {
+                    printer.write_input(input, stdout)?;
+                    unbounded_tail(&mut BufReader::new(file), settings, stdout)?;
+                }
+                Err(e) => show!(e.map_err_context(|| {
+                    translate_text!("tail-error-cannot-open-for-reading", "file" => input.display_name)
+                })),
+            },
+        }
+    }
+
+    Ok(())
 }
 
 fn uu_tail(settings: &Settings) -> UResult<()> {
@@ -189,7 +246,7 @@ fn tail_file(
                     reader = BufReader::new(file);
                 } else {
                     reader = BufReader::new(file);
-                    unbounded_tail(&mut reader, settings)?;
+                    unbounded_tail(&mut reader, settings, &mut stdout().lock())?;
                 }
                 if input.is_tailable() {
                     observer.add_path(
@@ -318,7 +375,7 @@ fn tail_stdin(
             }
         } else {
             let mut reader = BufReader::new(stdin());
-            unbounded_tail(&mut reader, settings)?;
+            unbounded_tail(&mut reader, settings, &mut stdout().lock())?;
         }
     }
 
@@ -503,8 +560,12 @@ fn bounded_tail(file: &mut File, settings: &Settings) -> UResult<()> {
     Ok(())
 }
 
-fn unbounded_tail<T: Read>(reader: &mut BufReader<T>, settings: &Settings) -> UResult<()> {
-    let mut writer = BufWriter::new(stdout().lock());
+fn unbounded_tail<T: Read>(
+    reader: &mut BufReader<T>,
+    settings: &Settings,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    let mut writer = BufWriter::new(stdout);
     match &settings.mode {
         FilterMode::Lines(Signum::Negative(count), sep) => {
             let mut chunks = chunks::LinesChunkBuffer::new(*sep, *count);

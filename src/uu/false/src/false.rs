@@ -4,12 +4,30 @@
 // file that was distributed with this source code.
 
 use clap::{Arg, ArgAction, Command};
-use std::io::{self, Write as _};
-use uucore::error::strip_errno;
+use std::io::{self, Read, Write};
+use uucore::error::{UResult, strip_errno};
 use uucore::{crate_version, show_error, translate};
 
 // uucore::main does not support no-result
-pub fn uumain(mut args: impl uucore::Args) -> i32 {
+pub fn uumain(args: impl uucore::Args) -> i32 {
+    status(args, None)
+}
+
+/// Runs false like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    _stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    match status(args, Some(stdout)) {
+        0 => Ok(()),
+        code => Err(code.into()),
+    }
+}
+
+/// The exit code of false, writing help and version to `stdout`, or to the process's standard output
+/// when there is none.
+fn status(mut args: impl uucore::Args, stdout: Option<&mut dyn Write>) -> i32 {
     #[cold]
     #[inline(never)]
     fn cold_error(e: io::Error) -> i32 {
@@ -26,10 +44,16 @@ pub fn uumain(mut args: impl uucore::Args) -> i32 {
     };
 
     let res = if flag == "--help" {
-        uu_app().print_help()
+        match stdout {
+            Some(stdout) => write!(stdout, "{}", uu_app().render_help()),
+            None => uu_app().print_help(),
+        }
     } else if flag == "--version" {
         // avoid uu_app for smaller binary size
-        writeln!(io::stdout(), "false {}", crate_version!())
+        match stdout {
+            Some(stdout) => writeln!(stdout, "false {}", crate_version!()),
+            None => writeln!(io::stdout(), "false {}", crate_version!()),
+        }
     } else {
         return 1;
     };

@@ -20,17 +20,8 @@ pub use platform::exec;
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
-
-    #[allow(clippy::unwrap_used, reason = "clap provides 'y' by default")]
-    let mut buffer = args_into_buffer(matches.get_many::<OsString>("STRING").unwrap());
-    // On the platform OsStr is not &[u8], reject invalid utf8
-    // todo: accept invalid utf8 on safe output type
-    #[cfg(not(any(unix, target_os = "wasi")))]
-    std::str::from_utf8(&buffer).map_err(|e| USimpleError::new(1, format!("{e}")))?;
-
-    repeat_content_to_capacity(&mut buffer);
-    match exec(&buffer) {
+    let yes = Yes::new(args)?;
+    match exec(yes.chunk()) {
         Ok(()) => Ok(()),
         // On Windows and WASI, silently handle broken pipe since there's no SIGPIPE
         #[cfg(any(windows, target_os = "wasi"))]
@@ -39,6 +30,34 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             1,
             translate!("yes-error-standard-output", "error" => strip_errno(&err)),
         )),
+    }
+}
+
+/// Yes a chunk of output at a time, for callers that write each chunk as it is read. Yes never
+/// finishes on its own: it ends when its output can not be written.
+pub struct Yes {
+    buffer: Vec<u8>,
+}
+
+impl Yes {
+    /// Parses the arguments like [`uumain`].
+    pub fn new(args: impl uucore::Args) -> UResult<Self> {
+        let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
+
+        #[allow(clippy::unwrap_used, reason = "clap provides 'y' by default")]
+        let mut buffer = args_into_buffer(matches.get_many::<OsString>("STRING").unwrap());
+        // On the platform OsStr is not &[u8], reject invalid utf8
+        // todo: accept invalid utf8 on safe output type
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        std::str::from_utf8(&buffer).map_err(|e| USimpleError::new(1, format!("{e}")))?;
+
+        repeat_content_to_capacity(&mut buffer);
+        Ok(Self { buffer })
+    }
+
+    /// The next chunk of output: whole repetitions of the line, so every chunk is the same.
+    pub fn chunk(&self) -> &[u8] {
+        &self.buffer
     }
 }
 

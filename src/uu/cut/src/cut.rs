@@ -920,16 +920,11 @@ fn cut_fields<R: Read, W: Write>(
     }
 }
 
-fn cut_files<'a, I>(filenames: I, mode: &Mode)
+fn cut_files<'a, I>(filenames: I, mode: &Mode, stdin: &mut dyn Read, mut out: &mut dyn Write)
 where
     I: IntoIterator<Item = &'a OsString>,
 {
     let mut stdin_read = false;
-    let mut out: Box<dyn Write> = if stdout().is_terminal() {
-        Box::new(stdout())
-    } else {
-        Box::new(BufWriter::new(stdout())) as Box<dyn Write>
-    };
 
     for filename in filenames {
         if filename == "-" {
@@ -938,9 +933,11 @@ where
             }
 
             show_if_err!(match mode {
-                Mode::Bytes(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, false),
-                Mode::Characters(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, true),
-                Mode::Fields(ranges, opts) => cut_fields(stdin(), &mut out, ranges, opts),
+                Mode::Bytes(ranges, opts) => cut_chars(&mut *stdin, &mut out, ranges, opts, false),
+                Mode::Characters(ranges, opts) => {
+                    cut_chars(&mut *stdin, &mut out, ranges, opts, true)
+                }
+                Mode::Fields(ranges, opts) => cut_fields(&mut *stdin, &mut out, ranges, opts),
             });
 
             stdin_read = true;
@@ -1051,6 +1048,24 @@ mod options {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let mut out: Box<dyn Write> = if stdout().is_terminal() {
+        Box::new(stdout())
+    } else {
+        Box::new(BufWriter::new(stdout())) as Box<dyn Write>
+    };
+    cut(args, &mut stdin(), &mut out)
+}
+
+/// Runs cut like [`uumain`], isolated from the process's standard streams.
+pub fn uumain_with(
+    args: impl uucore::Args,
+    mut stdin: Box<dyn Read>,
+    stdout: &mut dyn Write,
+) -> UResult<()> {
+    cut(args, &mut *stdin, &mut BufWriter::new(stdout))
+}
+
+fn cut(args: impl uucore::Args, stdin: &mut dyn Read, out: &mut dyn Write) -> UResult<()> {
     let args: Vec<OsString> = args.collect();
     // Kept for the caret in list diagnostics, which needs the arguments as
     // they were typed, before the rewrite below edits one of them.
@@ -1168,7 +1183,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     #[allow(clippy::unwrap_used, reason = "clap provides '-' by default")]
     let files = matches.get_many::<OsString>(options::FILE).unwrap();
 
-    cut_files(files, &mode);
+    cut_files(files, &mode, stdin, out);
 
     Ok(())
 }

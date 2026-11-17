@@ -203,7 +203,7 @@ pub(crate) enum Files {
 /// `ls` defaults depend on whether stdout is a terminal. `dir` and `vdir`
 /// default to a fixed format and escape quoting.
 #[derive(Clone, Copy)]
-enum ProgramMode {
+pub enum ProgramMode {
     Ls,
     Dir,
     Vdir,
@@ -259,7 +259,11 @@ pub struct Config {
 ///
 /// A tuple containing the Format variant and an Option containing a &'static str
 /// which corresponds to the option used to define the format.
-fn extract_format(options: &clap::ArgMatches, mode: ProgramMode) -> (Format, Option<&'static str>) {
+fn extract_format(
+    options: &clap::ArgMatches,
+    mode: ProgramMode,
+    terminal: bool,
+) -> (Format, Option<&'static str>) {
     if let Some(format_) = options.get_one::<String>(options::FORMAT) {
         (
             match format_.as_str() {
@@ -286,7 +290,7 @@ fn extract_format(options: &clap::ArgMatches, mode: ProgramMode) -> (Format, Opt
             ProgramMode::Dir => (Format::Columns, None),
             ProgramMode::Vdir => (Format::Long, None),
             ProgramMode::Ls => {
-                if stdout().is_terminal() {
+                if terminal {
                     (Format::Columns, None)
                 } else {
                     (Format::OneLine, None)
@@ -443,7 +447,7 @@ fn is_color_compatible_term() -> bool {
 /// # Returns
 ///
 /// A boolean representing whether or not to use color.
-fn extract_color(options: &clap::ArgMatches) -> bool {
+fn extract_color(options: &clap::ArgMatches, terminal: bool) -> bool {
     if !is_color_compatible_term() {
         return false;
     }
@@ -466,7 +470,7 @@ fn extract_color(options: &clap::ArgMatches) -> bool {
         None => options.contains_id(options::COLOR),
         Some(val) => match val.as_str() {
             "" | "always" | "yes" | "force" => true,
-            "auto" | "tty" | "if-tty" => stdout().is_terminal(),
+            "auto" | "tty" | "if-tty" => terminal,
             /* "never" | "no" | "none" | */ _ => false,
         },
     };
@@ -489,7 +493,7 @@ fn extract_color(options: &clap::ArgMatches) -> bool {
 /// # Returns
 ///
 /// A boolean representing whether to hyperlink files.
-fn extract_hyperlink(options: &clap::ArgMatches) -> bool {
+fn extract_hyperlink(options: &clap::ArgMatches, terminal: bool) -> bool {
     let hyperlink = options
         .get_one::<String>(options::HYPERLINK)
         .unwrap()
@@ -497,7 +501,7 @@ fn extract_hyperlink(options: &clap::ArgMatches) -> bool {
 
     match hyperlink {
         "always" | "yes" | "force" => true,
-        "auto" | "tty" | "if-tty" => stdout().is_terminal(),
+        "auto" | "tty" | "if-tty" => terminal,
         "never" | "no" | "none" => false,
         _ => unreachable!("should be handled by clap"),
     }
@@ -519,6 +523,7 @@ fn extract_quoting_style(
     options: &clap::ArgMatches,
     show_control: bool,
     mode: ProgramMode,
+    terminal: bool,
 ) -> QuotingStyle {
     let opt_quoting_style = options.get_one::<String>(QUOTING_STYLE);
 
@@ -541,9 +546,7 @@ fn extract_quoting_style(
 
         match mode {
             ProgramMode::Dir | ProgramMode::Vdir => QuotingStyle::Escape,
-            ProgramMode::Ls if stdout().is_terminal() => {
-                QuotingStyle::SHELL_ESCAPE.show_control(show_control)
-            }
+            ProgramMode::Ls if terminal => QuotingStyle::SHELL_ESCAPE.show_control(show_control),
             ProgramMode::Ls => QuotingStyle::Literal { show_control },
         }
     }
@@ -554,7 +557,7 @@ fn extract_quoting_style(
 /// # Returns
 ///
 /// An [`IndicatorStyle`] variant representing the indicator style to use.
-fn extract_indicator_style(options: &clap::ArgMatches) -> Option<IndicatorStyle> {
+fn extract_indicator_style(options: &clap::ArgMatches, terminal: bool) -> Option<IndicatorStyle> {
     if let Some(field) = options.get_one::<String>(options::INDICATOR_STYLE) {
         match field.as_str() {
             "file-type" => Some(IndicatorStyle::FileType),
@@ -565,7 +568,7 @@ fn extract_indicator_style(options: &clap::ArgMatches) -> Option<IndicatorStyle>
     } else if let Some(field) = options.get_one::<String>(options::indicator_style::CLASSIFY) {
         match field.as_str() {
             "always" | "yes" | "force" => Some(IndicatorStyle::Classify),
-            "auto" | "tty" | "if-tty" => stdout().is_terminal().then_some(IndicatorStyle::Classify),
+            "auto" | "tty" | "if-tty" => terminal.then_some(IndicatorStyle::Classify),
             "never" | "no" | "none" | &_ => None,
         }
     } else if options.get_flag(options::indicator_style::SLASH) {
@@ -578,7 +581,8 @@ fn extract_indicator_style(options: &clap::ArgMatches) -> Option<IndicatorStyle>
 }
 
 /// Parses the width value from either the command line arguments or the environment variables.
-fn parse_width(width_match: Option<&String>) -> Result<u16, LsError> {
+/// An isolated stdout has no terminal to size, so its width defaults to [`DEFAULT_TERM_WIDTH`].
+fn parse_width(width_match: Option<&String>, isolated: bool) -> Result<u16, LsError> {
     let parse_width_from_args = |s: &str| -> Result<u16, LsError> {
         let radix = if s.starts_with('0') && s.len() > 1 {
             8
@@ -607,8 +611,8 @@ fn parse_width(width_match: Option<&String>) -> Result<u16, LsError> {
     };
 
     let calculate_term_size = || match terminal_size::terminal_size() {
-        Some((width, _)) => width.0,
-        None => DEFAULT_TERM_WIDTH,
+        Some((width, _)) if !isolated => width.0,
+        _ => DEFAULT_TERM_WIDTH,
     };
 
     let ret = match width_match {
@@ -638,17 +642,27 @@ fn parse_tab_size(size_str: &str) -> Result<usize, LsError> {
 
 impl Config {
     pub fn from(options: &clap::ArgMatches, diag_args: Option<&[OsString]>) -> UResult<Self> {
-        Self::from_with_program_mode(options, diag_args, ProgramMode::Ls)
+        Self::from_with_program_mode(options, diag_args, ProgramMode::Ls, false)
     }
 
     /// Construct a configuration with dir's default column format and escape quoting.
     pub fn from_dir(options: &clap::ArgMatches, diag_args: Option<&[OsString]>) -> UResult<Self> {
-        Self::from_with_program_mode(options, diag_args, ProgramMode::Dir)
+        Self::from_with_program_mode(options, diag_args, ProgramMode::Dir, false)
     }
 
     /// Construct a configuration with vdir's default long format and escape quoting.
     pub fn from_vdir(options: &clap::ArgMatches, diag_args: Option<&[OsString]>) -> UResult<Self> {
-        Self::from_with_program_mode(options, diag_args, ProgramMode::Vdir)
+        Self::from_with_program_mode(options, diag_args, ProgramMode::Vdir, false)
+    }
+
+    /// Construct a configuration for `mode` writing to a stdout other than the process's own,
+    /// which, like a pipe, is not a terminal.
+    pub fn isolated(
+        options: &clap::ArgMatches,
+        diag_args: Option<&[OsString]>,
+        mode: ProgramMode,
+    ) -> UResult<Self> {
+        Self::from_with_program_mode(options, diag_args, mode, true)
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -656,9 +670,11 @@ impl Config {
         options: &clap::ArgMatches,
         diag_args: Option<&[OsString]>,
         mode: ProgramMode,
+        isolated: bool,
     ) -> UResult<Self> {
+        let terminal = !isolated && stdout().is_terminal();
         let context = options.get_flag(options::CONTEXT);
-        let (mut format, opt) = extract_format(options, mode);
+        let (mut format, opt) = extract_format(options, mode, terminal);
         // -1 and --zero override a default long format, but not an explicit one.
         let mut explicit_long = format == Format::Long && opt.is_some();
         let files = extract_files(options);
@@ -717,8 +733,8 @@ impl Config {
         }
 
         let time = extract_time(options);
-        let mut needs_color = extract_color(options);
-        let hyperlink = extract_hyperlink(options);
+        let mut needs_color = extract_color(options, terminal);
+        let hyperlink = extract_hyperlink(options, terminal);
 
         let opt_block_size = options.get_one::<String>(options::size::BLOCK_SIZE);
         let opt_si = opt_block_size.is_some_and(|x| x == options::size::SI)
@@ -782,18 +798,18 @@ impl Config {
                 numeric_uid_gid,
             }
         };
-        let width = parse_width(options.get_one::<String>(options::WIDTH))?;
+        let width = parse_width(options.get_one::<String>(options::WIDTH), isolated)?;
 
         let mut show_control = if options.get_flag(options::HIDE_CONTROL_CHARS) {
             false
         } else {
             options.get_flag(options::SHOW_CONTROL_CHARS)
                 || !matches!(mode, ProgramMode::Ls)
-                || !stdout().is_terminal()
+                || !terminal
         };
 
-        let mut quoting_style = extract_quoting_style(options, show_control, mode);
-        let indicator_style = extract_indicator_style(options);
+        let mut quoting_style = extract_quoting_style(options, show_control, mode, terminal);
+        let indicator_style = extract_indicator_style(options, terminal);
 
         let mut ignore_patterns: Vec<Pattern> = Vec::new();
 
